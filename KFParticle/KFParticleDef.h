@@ -22,10 +22,6 @@
 #ifndef KFParticleDef_H
 #define KFParticleDef_H
 
-#ifndef KFP_SIMD_SSE
-#define KFP_SIMD_SSE
-#endif
-
 #include <vector>
 #include <cstring>
 

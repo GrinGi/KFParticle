@@ -28,7 +28,9 @@
 
 //#ifdef __ROOT__ // for the STAR experiment
 //#define HomogeneousField
+#ifndef CBM
 #define CBM
+#endif
 //#endif
 
 #if defined(HLTCA_STANDALONE) || defined(CBM_ONLINE)
@@ -295,6 +297,7 @@ public:
     return fC[IJ(i, j)];
   }; ///< Modifier of C[i,j] element of the covariance matrix.
 
+  float *Parameters() { return fP; } ///< Mutable access for legacy clients.
   const float *Parameters() const {
     return fP;
   } ///< Returns pointer to the parameters fP

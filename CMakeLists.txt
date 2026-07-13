@@ -282,6 +282,20 @@ install(DIRECTORY KFParticlePerformance
         FILES_MATCHING
         PATTERN "*.h")
 
+# CBMRoot still includes these public performance headers through the legacy
+# KFParticle/ prefix, including while ROOT generates its dictionaries.
+install(FILES
+  KFParticlePerformance/KFTopoPerformance.h
+  KFParticlePerformance/KFParticlePerformanceBase.h
+  KFParticlePerformance/KFPVEfficiencies.h
+  KFParticlePerformance/KFMCCounter.h
+  KFParticlePerformance/KFMCVertex.h
+  KFParticlePerformance/KFPartMatch.h
+  KFParticlePerformance/KFMCTrack.h
+  KFParticlePerformance/KFMCParticle.h
+  KFParticlePerformance/KFPartEfficiencies.h
+  DESTINATION include/KFParticle)
+
 install(DIRECTORY KFParticleTest
         DESTINATION include
         FILES_MATCHING
