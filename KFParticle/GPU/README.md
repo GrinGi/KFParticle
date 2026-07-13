@@ -133,9 +133,12 @@ device image and runs the same lifecycle checks on `hip0`. Backend-specific XPU
 cache variables can be passed through the environment, for example
 `XPU_HIP_ARCH=gfx906` or `XPU_ROCM_ROOT=/opt/rocm`.
 
-The runner builds in `/tmp/kfparticle-gpu-xpu-test` by default. Use
-`KFPARTICLE_GPU_TEST_BUILD_DIR=/path/to/build` to keep the test build somewhere
-else or to remove it explicitly after debugging.
+The runner derives the CBMRoot checkout from its own location and builds by
+default in the sibling build tree
+`<CBMRoot-parent>/build/kfparticle-gpu-xpu-test`. This matches the usual
+`cbmroot/` and `build/` workspace layout. Use
+`KFPARTICLE_GPU_TEST_BUILD_DIR=/path/to/build` to override that location for an
+isolated build or debugging session.
 
 The lifecycle test currently launches the round-trip kernel with explicit
 kernel arguments. This isolates buffer upload, HIP kernel launch, execution,

@@ -3,7 +3,10 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source_dir="${script_dir}/xpu"
-build_dir="${KFPARTICLE_GPU_TEST_BUILD_DIR:-${PWD}/build/kfparticle-gpu-xpu-test}"
+repository_dir="$(cd "${script_dir}/../../.." && pwd)"
+cbmroot_dir="$(cd "${repository_dir}/../.." && pwd)"
+workspace_dir="$(cd "${cbmroot_dir}/.." && pwd)"
+build_dir="${KFPARTICLE_GPU_TEST_BUILD_DIR:-${workspace_dir}/build/kfparticle-gpu-xpu-test}"
 default_xpu_source_dir="$(cd "${script_dir}/../../../../xpu" && pwd)"
 xpu_source_dir="${KFPARTICLE_GPU_XPU_SOURCE_DIR:-${default_xpu_source_dir}}"
 xpu_source_dir="$(cd "${xpu_source_dir}" && pwd)"

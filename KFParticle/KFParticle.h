@@ -219,6 +219,7 @@ class KFParticle
   ///< triangular form.
   float& Covariance(int i, int j) { return fC[IJ(i, j)]; };  ///< Modifier of C[i,j] element of the covariance matrix.
 
+  float* Parameters() { return fP; }                    ///< Mutable access for legacy clients.
   const float* Parameters() const { return fP; }        ///< Returns pointer to the parameters fP
   const float* CovarianceMatrix() const { return fC; }  ///< Returns pointer to the covariance matrix fC
 
