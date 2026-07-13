@@ -26,6 +26,57 @@ else ()
   endif()
 endif ()
 
+option(KFPARTICLE_USE_XPU "Build the KFParticle XPU infrastructure." OFF)
+set(KFPARTICLE_XPU_SOURCE_DIR "" CACHE PATH "Optional XPU source tree for standalone KFParticle builds")
+set(XPU_SOURCE_DIR "" CACHE PATH "Legacy alias for KFPARTICLE_XPU_SOURCE_DIR")
+set(XPU_INCLUDE_DIR "" CACHE PATH "Optional legacy XPU include directory")
+
+if(KFPARTICLE_USE_XPU)
+  if(NOT KFPARTICLE_XPU_SOURCE_DIR AND XPU_SOURCE_DIR)
+    set(KFPARTICLE_XPU_SOURCE_DIR "${XPU_SOURCE_DIR}")
+  endif()
+
+  if(NOT CMAKE_VERSION VERSION_LESS "3.1")
+    if(NOT DEFINED CMAKE_CXX_STANDARD)
+      set(CMAKE_CXX_STANDARD 17)
+    elseif(CMAKE_CXX_STANDARD LESS 17)
+      set(CMAKE_CXX_STANDARD 17)
+    endif()
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
+    set(CMAKE_CXX_EXTENSIONS OFF)
+  endif()
+
+  if(NOT TARGET xpu)
+    if(EXISTS "${KFPARTICLE_XPU_SOURCE_DIR}/CMakeLists.txt")
+      # KFParticle is often built as an ExternalProject, where the parent xpu
+      # target is not visible. Attach the same XPU source tree locally instead.
+      add_subdirectory("${KFPARTICLE_XPU_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/xpu")
+    else()
+      message(FATAL_ERROR
+        "KFPARTICLE_USE_XPU requires an existing xpu target or "
+        "KFPARTICLE_XPU_SOURCE_DIR/XPU_SOURCE_DIR")
+    endif()
+  endif()
+
+  if(XPU_INCLUDE_DIR)
+    list(APPEND KFPARTICLE_XPU_INCLUDE_DIRS "${XPU_INCLUDE_DIR}")
+  elseif(KFPARTICLE_XPU_SOURCE_DIR)
+    list(APPEND KFPARTICLE_XPU_INCLUDE_DIRS "${KFPARTICLE_XPU_SOURCE_DIR}/src")
+  endif()
+
+  if(KFPARTICLE_XPU_INCLUDE_DIRS)
+    foreach(KFPARTICLE_XPU_INCLUDE_DIR ${KFPARTICLE_XPU_INCLUDE_DIRS})
+      if(NOT EXISTS "${KFPARTICLE_XPU_INCLUDE_DIR}/xpu/host.h")
+        message(FATAL_ERROR
+          "KFParticle XPU include directory is invalid: ${KFPARTICLE_XPU_INCLUDE_DIR}")
+      endif()
+    endforeach()
+  else()
+    message(FATAL_ERROR
+      "KFPARTICLE_USE_XPU could not determine the XPU include directory")
+  endif()
+endif()
+
 list(APPEND CMAKE_PREFIX_PATH $ENV{ROOTSYS} ${ROOTSYS})
 
 set(FIXTARGET FALSE CACHE BOOL "Compile for fix target geometry.")
@@ -49,6 +100,9 @@ Set(INCLUDE_DIRECTORIES
 include(${ROOT_USE_FILE})
 set(CMAKE_INCLUDE_DIRECTORIES_BEFORE ON)
 Include_Directories( ${CMAKE_SOURCE_DIR} ${Vc_INCLUDE_DIR} ${INCLUDE_DIRECTORIES} )
+if(KFPARTICLE_USE_XPU)
+  Include_Directories(${KFPARTICLE_XPU_INCLUDE_DIRS})
+endif()
 set(CMAKE_INCLUDE_DIRECTORIES_BEFORE OFF)
 
 set(LINK_DIRECTORIES
@@ -77,6 +131,17 @@ set (SOURCES
   KFParticlePerformance/KFMCParticle.cxx
   KFParticleTest/KFParticleTest.cxx
 )
+
+if(KFPARTICLE_USE_XPU)
+  list(APPEND SOURCES
+    KFParticle/GPU/KFParticleGpuBufferManager.cxx
+    KFParticle/GPU/KFParticleGpuDecayPlan.cxx
+    KFParticle/GPU/KFParticleGpuDeviceImage.cxx
+    KFParticle/GPU/KFParticleGpuKernels.cxx
+    KFParticle/GPU/KFParticleGpuRuntime.cxx
+    KFParticle/GPU/KFParticleGpuSteering.cxx
+  )
+endif()
 
 set (SIMD_HEADERS
   KFParticle/KFPSimd/simd.h
@@ -151,6 +216,29 @@ else(FIXTARGET)
   target_link_libraries(KFParticle ${ROOT_LIBRARIES} ${Vc_LIBRARIES} )
   add_target_property(KFParticle COMPILE_FLAGS "-DDO_TPCCATRACKER_EFF_PERFORMANCE -DHomogeneousField -DUSE_TIMERS")
 endif(FIXTARGET)
+
+if(KFPARTICLE_USE_XPU)
+  target_compile_definitions(KFParticle PUBLIC KFPARTICLE_USE_XPU)
+  target_include_directories(KFParticle PUBLIC
+    ${PROJECT_SOURCE_DIR}/KFParticle/GPU
+    ${KFPARTICLE_XPU_INCLUDE_DIRS})
+  if(TARGET xpu)
+    target_link_libraries(KFParticle xpu)
+  endif()
+  get_target_property(KFPARTICLE_LIBRARY_OUTPUT_DIRECTORY KFParticle LIBRARY_OUTPUT_DIRECTORY)
+  if(NOT KFPARTICLE_LIBRARY_OUTPUT_DIRECTORY)
+    set_target_properties(KFParticle PROPERTIES
+      LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+  endif()
+  if(COMMAND xpu_attach)
+    xpu_attach(KFParticle
+      KFParticle/GPU/KFParticleGpuDeviceImage.cxx
+      KFParticle/GPU/KFParticleGpuKernels.cxx
+    )
+  else()
+    message(FATAL_ERROR "KFPARTICLE_USE_XPU requires the xpu_attach CMake command")
+  endif()
+endif()
 
 if (ROOT_VERSION_MAJOR LESS 6)
     add_custom_target(libKFParticle.rootmap ALL DEPENDS KFParticle COMMAND rlibmap -o libKFParticle.rootmap -l libKFParticle.so -c ${PROJECT_SOURCE_DIR}/KFLinkDef.h)
