@@ -14,6 +14,7 @@
 #include "KFParticleGpuDecayPlan.h"
 #include "KFParticleGpuKernels.h"
 
+#include <chrono>
 #include <stdexcept>
 
 #ifdef KFPARTICLE_GPU_TRACE
@@ -100,6 +101,8 @@ struct KFParticleGpuSteering::Impl
   std::unique_ptr<KFParticleGpuBufferManager> fBuffers;
   KFParticleGpuKernels fKernels;
   std::vector<KFParticleGpuTwoDaughterChannelResult> fLastDecayPlanResults;
+  std::vector<KFParticleGpuDecayPlanEventResult> fLastDecayPlanEventResults;
+  KFParticleGpuDecayPlanTiming fLastDecayPlanTiming;
   KFParticleGpuSelectedCandidateRange fLastDecayPlanSelectedCandidates;
   std::vector<KFParticleGpuSelectedChannelRange> fLastDecayPlanSelectedChannels;
 #endif
@@ -108,7 +111,8 @@ struct KFParticleGpuSteering::Impl
 #ifdef KFPARTICLE_USE_XPU
   explicit Impl(xpu::queue& queue)
     : fInitialized(false), fQueue(queue), fBuffers(), fKernels(), fLastDecayPlanResults(),
-      fLastDecayPlanSelectedCandidates(), fLastDecayPlanSelectedChannels(), fDecayPlan()
+      fLastDecayPlanEventResults(),
+      fLastDecayPlanTiming(), fLastDecayPlanSelectedCandidates(), fLastDecayPlanSelectedChannels(), fDecayPlan()
   {
   }
 #else
@@ -455,87 +459,152 @@ const std::vector<KFParticleGpuTwoDaughterChannelResult>& KFParticleGpuSteering:
   unsigned int eventIndex,
   unsigned int taskCapacity)
 {
+  return RunDecayPlanBatch(eventIndex, 1u, taskCapacity);
+}
+
+const std::vector<KFParticleGpuTwoDaughterChannelResult>& KFParticleGpuSteering::RunDecayPlanBatch(
+  unsigned int firstEventIndex,
+  unsigned int eventCount,
+  unsigned int taskCapacity)
+{
   if (!fImpl->fInitialized) {
     throw std::logic_error("KFParticle GPU steering is not initialized");
   }
-  if (eventIndex >= fImpl->fBuffers->EventSize()) {
-    throw std::out_of_range("KFParticle GPU decay-plan event index is out of range");
+  if (eventCount == 0u) {
+    throw std::invalid_argument("KFParticle GPU decay-plan batch must contain at least one event");
+  }
+  if (firstEventIndex >= fImpl->fBuffers->EventSize()
+      || eventCount > fImpl->fBuffers->EventSize() - firstEventIndex) {
+    throw std::out_of_range("KFParticle GPU decay-plan batch event range is out of range");
   }
   if (taskCapacity == 0u) {
     throw std::invalid_argument("KFParticle GPU decay-plan task capacity must be positive");
   }
 
   fImpl->fLastDecayPlanResults.clear();
+  fImpl->fLastDecayPlanEventResults.clear();
+  fImpl->fLastDecayPlanTiming = KFParticleGpuDecayPlanTiming();
   fImpl->fLastDecayPlanSelectedCandidates = KFParticleGpuSelectedCandidateRange();
   fImpl->fLastDecayPlanSelectedChannels.clear();
+  const auto elapsedMilliseconds = [](std::chrono::steady_clock::time_point started) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+  };
+  const auto inputUploadStarted = std::chrono::steady_clock::now();
   fImpl->fBuffers->UploadInput();
+  fImpl->fLastDecayPlanTiming.inputUploadMilliseconds = elapsedMilliseconds(inputUploadStarted);
+  const auto constructionStarted = std::chrono::steady_clock::now();
   fImpl->fBuffers->ResetCandidates();
   fImpl->fBuffers->ResetV0SelectionResults();
   if (fImpl->fDecayPlan->Empty()) {
+    for (unsigned int eventOffset = 0u; eventOffset < eventCount; ++eventOffset) {
+      KFParticleGpuDecayPlanEventResult eventResult;
+      eventResult.eventIndex = firstEventIndex + eventOffset;
+      fImpl->fLastDecayPlanEventResults.push_back(eventResult);
+    }
+    fImpl->fLastDecayPlanTiming.constructionMilliseconds = elapsedMilliseconds(constructionStarted);
+    const auto downloadStarted = std::chrono::steady_clock::now();
     fImpl->fBuffers->DownloadCandidates();
+    fImpl->fLastDecayPlanTiming.outputDownloadMilliseconds = elapsedMilliseconds(downloadStarted);
     return fImpl->fLastDecayPlanResults;
   }
 
   unsigned int candidateOffset = 0u;
   unsigned int daughterOffset = 0u;
-  for (std::size_t i = 0; i < fImpl->fDecayPlan->NumberOfTwoDaughterChannels(); ++i) {
-    const KFParticleGpuTwoDaughterChannel& channel =
-      fImpl->fDecayPlan->TwoDaughterChannel(i);
-    const KFParticleGpuTwoDaughterTaskSource source =
-      MakeTwoDaughterTaskSource(channel, eventIndex);
-    fImpl->fLastDecayPlanResults.push_back(RunTwoDaughterCompactChannel(
-      source, taskCapacity, channel.channelId, candidateOffset, daughterOffset));
-    const KFParticleGpuTwoDaughterChannelResult& result = fImpl->fLastDecayPlanResults.back();
-    candidateOffset += result.candidates.size;
-    daughterOffset += result.candidates.daughterSize;
+  for (unsigned int eventOffset = 0u; eventOffset < eventCount; ++eventOffset) {
+    const unsigned int eventIndex = firstEventIndex + eventOffset;
+    KFParticleGpuDecayPlanEventResult eventResult;
+    eventResult.eventIndex = eventIndex;
+    eventResult.channelOffset = static_cast<unsigned int>(fImpl->fLastDecayPlanResults.size());
+    eventResult.candidates.offset = candidateOffset;
+    eventResult.candidates.daughterOffset = daughterOffset;
+    for (std::size_t channelIndex = 0u;
+         channelIndex < fImpl->fDecayPlan->NumberOfTwoDaughterChannels();
+         ++channelIndex) {
+      const KFParticleGpuTwoDaughterChannel& channel =
+        fImpl->fDecayPlan->TwoDaughterChannel(channelIndex);
+      fImpl->fLastDecayPlanResults.push_back(RunTwoDaughterCompactChannel(
+        MakeTwoDaughterTaskSource(channel, eventIndex),
+        taskCapacity,
+        channel.channelId,
+        candidateOffset,
+        daughterOffset));
+      const KFParticleGpuTwoDaughterChannelResult& result = fImpl->fLastDecayPlanResults.back();
+      candidateOffset += result.candidates.size;
+      daughterOffset += result.candidates.daughterSize;
+      eventResult.overflowFlags |= result.candidates.overflowFlags;
+    }
+    eventResult.channelCount = static_cast<unsigned int>(fImpl->fLastDecayPlanResults.size())
+                               - eventResult.channelOffset;
+    eventResult.candidates.size = candidateOffset - eventResult.candidates.offset;
+    eventResult.candidates.daughterSize = daughterOffset - eventResult.candidates.daughterOffset;
+    eventResult.candidates.overflowFlags = eventResult.overflowFlags;
+    fImpl->fLastDecayPlanEventResults.push_back(eventResult);
   }
+  fImpl->fLastDecayPlanTiming.constructionMilliseconds = elapsedMilliseconds(constructionStarted);
 
   // Default V0 channels append compact indices while the raw candidate pool is
   // still resident. Generic channels leave expectedMass unset and skip this
   // physics-specific continuation.
+  const auto selectionStarted = std::chrono::steady_clock::now();
   fImpl->fBuffers->ResetSelectedCandidates();
-  for (std::size_t i = 0; i < fImpl->fLastDecayPlanResults.size(); ++i) {
-    const KFParticleGpuTwoDaughterChannel& channel = fImpl->fDecayPlan->TwoDaughterChannel(i);
-    const KFParticleGpuTwoDaughterChannelResult& result = fImpl->fLastDecayPlanResults[i];
-    if (channel.selection.expectedMass <= 0.f || result.candidates.size == 0u) {
-      continue;
+  for (const auto& eventResult : fImpl->fLastDecayPlanEventResults) {
+    for (unsigned int channelOffset = 0u; channelOffset < eventResult.channelCount; ++channelOffset) {
+      const KFParticleGpuTwoDaughterChannel& channel =
+        fImpl->fDecayPlan->TwoDaughterChannel(channelOffset);
+      const KFParticleGpuTwoDaughterChannelResult& result =
+        fImpl->fLastDecayPlanResults[eventResult.channelOffset + channelOffset];
+      if (channel.selection.expectedMass <= 0.f || result.candidates.size == 0u) {
+        continue;
+      }
+      fImpl->fQueue.launch<KFParticleGpuSelectV0Candidates>(
+        xpu::n_threads(result.candidates.size),
+        MakeConstView(fImpl->fBuffers->DeviceCandidates()),
+        MakeConstView(fImpl->fBuffers->DevicePrimaryVertices()),
+        fImpl->fBuffers->DeviceEvents(),
+        eventResult.eventIndex,
+        result.candidates.offset,
+        result.candidates.size,
+        channel.channelId,
+        channel.selection,
+        fImpl->fBuffers->DeviceV0SelectionResults(),
+        fImpl->fBuffers->DeviceSelectedCandidates());
     }
-    fImpl->fQueue.launch<KFParticleGpuSelectV0Candidates>(
-      xpu::n_threads(result.candidates.size),
-      MakeConstView(fImpl->fBuffers->DeviceCandidates()),
-      MakeConstView(fImpl->fBuffers->DevicePrimaryVertices()),
-      fImpl->fBuffers->DeviceEvents(),
-      eventIndex,
-      result.candidates.offset,
-      result.candidates.size,
-      channel.channelId,
-      channel.selection,
-      fImpl->fBuffers->DeviceV0SelectionResults(),
-      fImpl->fBuffers->DeviceSelectedCandidates());
   }
   fImpl->fQueue.wait();
+  fImpl->fLastDecayPlanTiming.selectionMilliseconds = elapsedMilliseconds(selectionStarted);
+  const auto downloadStarted = std::chrono::steady_clock::now();
   fImpl->fBuffers->DownloadSelectedCandidates();
+  fImpl->fBuffers->DownloadV0SelectionResults();
   const KFParticleGpuConstSelectedCandidateIndexView selected =
     MakeConstView(fImpl->fBuffers->HostSelectedCandidates());
   fImpl->fLastDecayPlanSelectedCandidates.offset = 0u;
   fImpl->fLastDecayPlanSelectedCandidates.size = selected.Size();
   fImpl->fLastDecayPlanSelectedCandidates.overflowFlags = selected.OverflowFlags();
   unsigned int selectedOffset = 0u;
-  for (std::size_t i = 0; i < fImpl->fLastDecayPlanResults.size(); ++i) {
-    const KFParticleGpuTwoDaughterChannelResult& channelResult = fImpl->fLastDecayPlanResults[i];
-    KFParticleGpuSelectedChannelRange channelRange;
-    channelRange.channelId = channelResult.channelId;
-    channelRange.eventIndex = eventIndex;
-    channelRange.candidates.offset = selectedOffset;
-    while (selectedOffset < selected.Size()
-           && selected.ChannelId(selectedOffset) == channelRange.channelId) {
-      ++selectedOffset;
+  for (auto& eventResult : fImpl->fLastDecayPlanEventResults) {
+    eventResult.selectedCandidates.offset = selectedOffset;
+    for (unsigned int channelOffset = 0u; channelOffset < eventResult.channelCount; ++channelOffset) {
+      const KFParticleGpuTwoDaughterChannelResult& channelResult =
+        fImpl->fLastDecayPlanResults[eventResult.channelOffset + channelOffset];
+      KFParticleGpuSelectedChannelRange channelRange;
+      channelRange.channelId = channelResult.channelId;
+      channelRange.eventIndex = eventResult.eventIndex;
+      channelRange.candidates.offset = selectedOffset;
+      while (selectedOffset < selected.Size()
+             && selected.ChannelId(selectedOffset) == channelRange.channelId
+             && channelResult.candidates.ContainsCandidate(selected.Index(selectedOffset))) {
+        ++selectedOffset;
+      }
+      channelRange.candidates.size = selectedOffset - channelRange.candidates.offset;
+      channelRange.candidates.overflowFlags = selected.OverflowFlags();
+      fImpl->fLastDecayPlanSelectedChannels.push_back(channelRange);
     }
-    channelRange.candidates.size = selectedOffset - channelRange.candidates.offset;
-    channelRange.candidates.overflowFlags = selected.OverflowFlags();
-    fImpl->fLastDecayPlanSelectedChannels.push_back(channelRange);
+    eventResult.selectedCandidates.size = selectedOffset - eventResult.selectedCandidates.offset;
+    eventResult.selectedCandidates.overflowFlags = selected.OverflowFlags();
+    eventResult.overflowFlags |= selected.OverflowFlags();
   }
   fImpl->fBuffers->DownloadCandidates();
+  fImpl->fLastDecayPlanTiming.outputDownloadMilliseconds = elapsedMilliseconds(downloadStarted);
   return fImpl->fLastDecayPlanResults;
 }
 
@@ -546,6 +615,23 @@ KFParticleGpuSteering::LastDecayPlanResults() const
     throw std::logic_error("KFParticle GPU steering is not initialized");
   }
   return fImpl->fLastDecayPlanResults;
+}
+
+const std::vector<KFParticleGpuDecayPlanEventResult>&
+KFParticleGpuSteering::LastDecayPlanEventResults() const
+{
+  if (!fImpl->fInitialized) {
+    throw std::logic_error("KFParticle GPU steering is not initialized");
+  }
+  return fImpl->fLastDecayPlanEventResults;
+}
+
+const KFParticleGpuDecayPlanTiming& KFParticleGpuSteering::LastDecayPlanTiming() const
+{
+  if (!fImpl->fInitialized) {
+    throw std::logic_error("KFParticle GPU steering is not initialized");
+  }
+  return fImpl->fLastDecayPlanTiming;
 }
 
 const KFParticleGpuSelectedCandidateRange& KFParticleGpuSteering::LastDecayPlanSelectedCandidates() const

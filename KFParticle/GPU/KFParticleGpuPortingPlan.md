@@ -855,6 +855,36 @@ Step 8.1 notes:
 
 Status: Step 8 in progress. Stage 1 of 6 complete.
 
+### Stage 9.0: Share one XPU build graph in standalone and CBMRoot modes
+
+- Preserve the algorithm-local `KFParticleGpuRuntime` queue in both modes; no
+  borrowed CBMRoot queue is required or used.
+- In standalone mode, KFParticle continues to configure the requested XPU
+  source tree itself.
+- In CBMRoot mode, replace the KFParticle `ExternalProject` with an embedded
+  subdirectory build. The existing parent `xpu` target and `xpu_attach()` are
+  then visible to KFParticle, preventing a second XPU installation in
+  `build/lib`.
+- Make dictionary paths local to the KFParticle binary subdirectory, because
+  the old project assumed it was always configured at the CMake top level.
+- Keep the historical `KFPARTICLE` target as a dependency wrapper so existing
+  CBMRoot dictionary targets continue to build in the required order.
+
+Completion criteria: a fresh CBMRoot configure reports one parent `xpu` target,
+no `KFPARTICLE-prefix` ExternalProject is configured, and `KFPARTICLE` builds
+`KFParticle` plus its device image through that same target graph. Standalone
+lifecycle tests remain unchanged.
+
+Status: implementation complete; requires a clean reconfigure and HIP/CPU
+validation in the CBMRoot build environment.
+
+Validation helper: `GPU/test/cbmroot/run_cbmroot_xpu_smoke.sh` is a temporary
+ROOT-macro smoke test kept with KFParticle rather than CBMRoot's permanent
+test suite. It uses the current CBMRoot `build/lib`, initializes `cbm::Xpu`,
+requires KFParticle to attach without initializing XPU again, runs a minimal
+`RunRoundTrip()` device path, and verifies that `Finalize()` leaves the global
+runtime active.
+
 ## Step 9: CBMRoot Default-V0 Diagnostic Adapter
 
 Step 9 connects the completed standalone default-V0 GPU boundary to real
@@ -876,6 +906,67 @@ production-routing decision.
    - Completion: a disabled-by-default adapter compiles in CBMRoot, while a
      normal CPU-only configuration remains behaviourally and link-time
      unchanged.
+
+   Research decision: the primary first boundary is
+   `cbm::algo::kfp::Selector`, called by its thread-local `KfpSelectorChain`
+   after `EventReconstruction`. It builds field-aware first/last
+   `KFPTrackVector` inputs from `TrackFitter` immediately before CPU topology
+   reconstruction. The process-wide `KFParticleGpuRuntime` deliberately keeps
+   one KFParticle-owned queue and buffer manager, so per-selector adapter
+   handles must serialize their diagnostic `pack -> launch -> download`
+   transaction through that service. The legacy `CbmKFParticleFinder` is a
+   later offline comparison path. The mCBM `V0Finder` is excluded from this
+   field-aware first route because it is Lambda-only and currently writes zero
+   field coefficients by design.
+
+   Initial implementation: `CBM_KFPARTICLE_GPU_DIAGNOSTICS=ON` builds the
+   isolated `CbmKfParticleGpuDiagnostic` target. Its process-wide service
+   attaches to the already initialized XPU runtime with
+   `initializeXpuIfNeeded=false` and returns an RAII transaction that locks
+   shared KFParticle steering and buffers.
+
+   Stage 9.2 implementation: `GpuDiagnosticPacker` accepts Selector's
+   field-aware first/last `KFPTrackVector` inputs, their parallel chi-to-PV
+   values, and primary vertices. `Prepare()` validates finite physical input,
+   rejects inconsistent vectors or invalid source IDs, and reproduces CPU
+   `SortTracks()` classification into the eight GPU input sets. It records
+   explicit ranges without SIMD padding; `Write()` copies all numerical,
+   covariance, field, chi-to-PV, integer, and vertex components only into
+   fresh host SoA views. The packer deliberately performs neither transfer nor
+   kernel launch. A CPU regression covers ranges, component-major stride,
+   field/vertex copy, invalid input, and first-point classification of last
+   track states.
+
+   Stage 9.3 implementation: with `CBM_KFPARTICLE_GPU_DIAGNOSTICS=ON`,
+   `GpuDiagnosticRunner` is linked into `Algo` and `AlgoOffline` and is called
+   after the normal CPU `Selector` reconstruction. It configures the default
+   K0S/Lambda/anti-Lambda plan, derives an exact physical-pair capacity, grows
+   persistent KFParticle buffers, packs host views, and calls `RunDecayPlan()`.
+   It reports per-event structured success, no-input/no-pair, overflow, input,
+   runtime, and execution statuses without changing the CPU selection result.
+
+   Stage 9.4 implementation: `GpuDiagnosticComparator` extracts CPU default-V0
+   candidates by resolving CPU daughter particle indices to their original
+   track IDs and compares them with snapshots read from the GPU raw candidate
+   and selected-index pools. The identity is `(event, channel, canonical daughter
+   source IDs)`, not a mutable pool index. It reports channel-local CPU-only,
+   GPU-only, matched, selection-mismatch, unresolved-CPU, and max mass/chi2
+   residual counts. GPU snapshots retain flags, PV and selection/rejection
+   metadata for the reporting workflow. The comparator is exercised without a
+   device by an order-independent lineage-key regression.
+
+   Stage 9.5 implementation: `gpuDiagnostics` is an opt-in selector YAML
+   block with a positive `samplePeriod`. The GPU adapter is therefore inactive
+   even in a diagnostics-enabled build until a run configuration explicitly
+   requests it. `GpuDiagnosticReporter` safely aggregates results from the
+   parallel selector threads; `Reco` emits one short timeslice summary instead
+   of per-event technical output. CPU tests cover the aggregation path.
+
+   Stage 9.6 implementation: the diagnostic result records aggregate GPU
+   transaction wall time and `KFParticleGpuCbmRootValidation.md` fixes the
+   build, runtime-smoke, sampling, campaign-recording, and promotion criteria.
+   An empirical CPU/HIP campaign on a stable sample remains required evidence;
+   it cannot be replaced by a unit test and output remains diagnostics-only.
 
 2. **Stage 9.2: Implement lossless event packing.**
    - Build a dedicated packer from the CPU `KFPTrackVector` representation to
@@ -903,15 +994,15 @@ production-routing decision.
      structured per-event status without changing reconstructed output.
 
 4. **Stage 9.4: Add a keyed CPU/GPU comparison layer.**
-   - Match candidates by `(channel ID, event ID, ordered daughter source IDs)`
+   - Match candidates by `(channel ID, event ID, canonical daughter source IDs)`
      rather than pool index. Compare construction counts, overflow state,
      fit/covariance-derived quantities, selection observables, classification,
      rejection reasons, best PV, and compact membership.
    - Record numerical residuals and unmatched candidates separately by channel
      and failure category. Use reporting tolerances as diagnostics, not as
      production acceptance cuts.
-   - Make atomic selected ordering irrelevant while validating channel ranges
-     and lineage exactly.
+   - Make atomic selected ordering and CPU/GPU daughter storage order irrelevant
+     while validating channel ranges and canonical lineage exactly.
    - Completion: comparison output can distinguish packing errors,
      construction/transport differences, and selection-only differences.
 
@@ -947,7 +1038,261 @@ promotion decision. This keeps CBMRoot integration separate from future
 physics work such as full `TransportCBM`, production-vertex constraints, and
 higher-generation decay reconstruction.
 
-Status: Step 9 planned, not started. Step 8 is the standalone prerequisite.
+Status: the initial Step 9 implementation is complete, but the closure audit
+identified remaining reporting and validation work. Output remains
+diagnostics-only.
+
+### Step 9 completion audit and closure plan
+
+1. **Stage 9.C1: Make diagnostics independent and non-invasive.**
+   - Create the selector when `gpuDiagnostics` is requested even without a KFP
+     trigger mask, but do not add its CPU output to `DigiEvent::fSelectionMask`
+     in that diagnostic-only mode.
+   - Catch the complete post-CPU diagnostic tail, including comparison and
+     reporting, and record an unexpected failure without propagating it into
+     CPU reconstruction.
+   - Status: complete. Reporter regression coverage verifies unexpected
+     diagnostic failure aggregation; an end-to-end selector exercise remains
+     part of Stage 9.C4.
+
+2. **Stage 9.C2: Complete comparison semantics.**
+   - Compare and classify best-PV, selection flags, rejection reasons, NDF,
+     and unmatched-candidate categories in addition to lineage, mass, and
+     chi2.
+   - Status: complete for the values exposed by the current CPU boundary. The
+     adapter compares mass validity/error, NDF, chi2, selection membership, and
+     lineage; it records per-candidate discrepancy bits. CPU `KFParticle`
+     candidates do not expose best-PV, selection class, or rejection masks, so
+     these remain explicitly labelled GPU-only observations rather than false
+     mismatches.
+
+3. **Stage 9.C3: Complete channel-level telemetry.**
+   - Report per-channel counts, residual summaries, diagnostic statuses, and
+     separate CPU-reference, upload, kernel, download, and comparison times.
+   - Status: complete. The process-wide report aggregates all comparison
+     categories and GPU-only selection observations per channel. It records
+     host wall-time for CPU reference, input preparation, queue/capacity, host
+     packing, H2D input, construction, selection, D2H output, extraction,
+     comparison, and total transaction. Construction and selection include the
+     required queue waits and scalar status copies, so they are explicitly not
+     presented as device-event kernel timings.
+
+4. **Stage 9.C4: Add a reproducible external integration harness.**
+   - Keep the harness beside KFParticle GPU tests, and exercise disabled,
+     diagnostic-only, successful, field-rejected, overflow, and CPU-output
+     preservation cases with a stable CBMRoot input.
+   - Status: complete. A ROOT smoke macro runs the
+     built CBMRoot adapter over a minimal field-aware V0, checks the default
+     GPU plan, lineage, telemetry, reporter aggregation, and invalid-input
+     rejection. A separate campaign wrapper accepts caller-owned baseline and
+     diagnostic reconstruction commands and optionally requires byte-identical
+     CPU output. Field-rejected and overflow statuses remain campaign inputs:
+     they depend on the chosen detector configuration and are reported, not
+     fabricated by a synthetic macro.
+
+5. **Stage 9.C5: Record CPU/HIP validation evidence.**
+   - **9.C5a: Hermetic CPU/GPU V0 equivalence gate.** Add one external,
+     compiled executable that builds controlled first/last `KFPTrackVector` input (which the
+     CPU finder sorts into its internal eight sets) and a primary vertex, runs
+     the existing `KFParticleTopoReconstructor` CPU finder, then runs the same
+     physical input through `GpuDiagnosticRunner`. Cover K0S, Lambda and
+     anti-Lambda in a controlled constant-By field plus invalid input; bounded-pool overflow stays
+     in the standalone lifecycle test where allocation is directly controlled.
+     Require exact channel/lineage/count agreement and bounded mass,
+     mass-error, chi2 and NDF differences; do not require bitwise floating
+     point equality.
+   - **9.C5b: One HIP evidence run and closure.** Run that executable on the
+     configured accelerator and record the command, device, ROCm version and
+     aggregate comparison. Retain the existing real-input campaign wrapper as
+     a later production-routing gate rather than blocking Step 9.
+   - Status: complete. The HIP equivalence run now emits a compact evidence
+     record beside its log with the command, device, ROCm context, host, and
+     log hash. Evidence tooling remains available for a later real-data
+     campaign, with commands, environment, log hashes, telemetry, and optional
+     byte-identical CPU-output verification.
+
+Status: Step 9 complete. The adapter remains diagnostics-only; a real-data
+campaign, batching work, full nonhomogeneous transport, and any production
+routing decision are separate follow-up work.
+
+## Step 10: Batched Default-V0 GPU Diagnostic Pipeline
+
+Step 10 removes the intentionally conservative one-event-at-a-time execution
+model from the diagnostics path. It keeps the existing process-local
+KFParticle queue and persistent device storage, but turns a group of
+independent CBMRoot selector events into one bounded GPU batch. CPU
+reconstruction remains authoritative and untouched. This is a throughput and
+data-flow step, not a production-routing decision and not a port of full
+`TransportCBM` or higher-generation decay reconstruction.
+
+1. **Stage 10.1: Define and build the bounded batch ABI.**
+   - Add a host-side batch builder that accumulates already validated
+     `KFPTrackVector` first/last states, chi-to-PV arrays, vertices, and source
+     event IDs into the existing flat SoA/event-descriptor layout. It must
+     preserve the eight track-set meanings, absolute offsets, field regions,
+     and event isolation without importing CPU SIMD padding.
+   - Define explicit batch limits for events, tracks, vertices, candidate
+     tasks, raw candidates, daughters, and selected candidates. A batch is
+     sealed before any buffer write; an event that cannot fit is reported as a
+     diagnostic status rather than partially packed.
+   - Keep the batch object CPU-only and non-owning until it is submitted. This
+     makes enqueue, rejection, and retry behaviour deterministic and keeps the
+     persistent XPU-buffer owner in `KFParticleGpuDeviceStorage`.
+   - Completion: unit tests cover mixed empty/non-empty events, all default
+     channel input sets, absolute offsets, malformed-event isolation, and a
+     deterministic split at each configured capacity limit.
+
+2. **Stage 10.2: Execute one device-resident multi-event decay plan.**
+   - Extend the steering boundary so one upload publishes every packed event,
+     generates tasks for all event/channel pairs, constructs raw candidates,
+     and runs V0 selection as one queue-ordered transaction. Kernels receive
+     scalar batch ranges or use the published state; they must not receive
+     per-event host arrays.
+   - Preserve event and channel identity in all task, raw-candidate, selected,
+     overflow, and diagnostic records. Capacity and status readback remains
+     scalar until the existing final result hand-off; no per-event candidate
+     SoA download is introduced.
+   - Return stable per-event/per-channel result ranges and statuses, including
+     empty, rejected, and overflowed events, so a caller can split a batch
+     without relying on atomic output order.
+   - Completion: CPU and HIP regressions compare a batch against the existing
+     serial `RunDecayPlan()` reference for lineage, counts, ranges, selection
+     records, and overflow attribution across mixed channel/event fixtures.
+
+3. **Stage 10.3: Integrate batch submission into CBMRoot diagnostics.**
+   - Replace the diagnostic service's per-event transaction with a bounded
+     collector and an explicit flush point compatible with the selector and
+     timeslice lifecycle. The service still owns one KFParticle queue and
+     serializes submissions; it must never borrow a CBMRoot queue or delay the
+     CPU selection result.
+   - Feed each completed GPU batch back into the existing comparator and
+     reporter as individual event results. Preserve sampling semantics,
+     diagnostic-only failure isolation, and concise timeslice reporting while
+     adding batch size, queue wait, and flush-reason telemetry.
+   - Completion: a CBMRoot-side regression proves CPU output preservation,
+     deterministic flush at end-of-timeslice and capacity, reporting for mixed
+     success/invalid/overflow events, and no cross-event lineage match.
+
+4. **Stage 10.4: Validate throughput and define the next promotion gate.**
+   - Add a reproducible external HIP batch harness beside the existing
+     KFParticle tests. It runs controlled multi-event K0S/Lambda/anti-Lambda
+     fixtures and records batch composition, H2D, construction, selection,
+     D2H, comparison, and total wall times alongside the serial reference.
+   - Run CPU and HIP evidence cases over several safe batch sizes. Document
+     the observed crossover, memory limits, overflow behaviour, and any
+     residual mismatch category; keep verbose per-event dumps opt-in.
+   - Define the decision boundary for a later step: retain batched diagnostics,
+     expand field-transport equivalence, or separately propose controlled
+     production routing. Step 10 never switches candidate ownership from CPU
+     to GPU.
+   - Completion: the batch path is reproducible on CPU and HIP, preserves
+     per-event diagnostic correctness, and has enough timing evidence to
+     decide whether a production handoff is technically justified.
+
+Status: Step 10 complete. The batch ABI, one-transaction steering path,
+CBMRoot diagnostic collector, compact selected-output partitioning, and
+reproducible CPU/HIP evidence harness are implemented and validated.
+
+Stage 10.1 implementation notes:
+
+- Added `GpuDiagnosticBatchBuilder` and its sealed
+  `GpuDiagnosticPreparedBatch` contract in the CBMRoot diagnostic adapter.
+  The builder owns no XPU buffers and retains only the existing non-owning
+  prepared CPU inputs until host SoA views are written.
+- Each batch member carries its 64-bit source event identity, GPU event index,
+  absolute track/vertex offsets, default-V0 task capacity, and an absolute
+  `KFParticleGpuEventDesc`. Failed append attempts leave all accumulated
+  ranges unchanged, allowing the caller to flush and retry that event in a
+  fresh batch.
+- Added offset-aware host packing to `GpuDiagnosticPacker`; it writes a sealed
+  batch into one flat SoA/event-descriptor allocation without transferring data
+  to the device. GPU upload, kernels, and selector scheduling remain outside
+  this stage.
+- CPU regression coverage now exercises mixed default V0 channel inputs,
+  absolute ranges and copied metadata, empty/malformed event isolation, and
+  deterministic rejection at every batch capacity limit.
+
+Stage 10.2 implementation notes:
+
+- Added `RunDecayPlanBatch(firstEventIndex, eventCount, taskCapacity)` to
+  `KFParticleGpuSteering`. The existing single-event `RunDecayPlan()` is now a
+  compatibility wrapper over a one-event batch, so no current caller changes
+  behaviour.
+- One batch performs a single input upload, candidate/selection reset, ordered
+  channel construction and selection launches, then one final candidate and
+  selection hand-off. Per-channel task and pool status transfers remain scalar;
+  no per-event candidate SoA download was added.
+- `LastDecayPlanEventResults()` publishes stable event partitions: the flat
+  channel-result span, raw candidate/daughter range, compact selected range,
+  and accumulated overflow flags. Selected ranges use raw candidate membership
+  as well as channel ID, so an empty channel cannot consume a later event's
+  output with the same channel ID.
+- Added a lifecycle regression that compares a two-event batch with the two
+  former serial executions, checks event/channel offsets and candidate lineage,
+  and verifies that raw output never crosses the event boundary. HIP execution
+  remains the required validation for this implementation stage.
+
+Stage 10.3 implementation notes:
+
+- `GpuDiagnosticRunner::RunBatch()` submits one sealed CBMRoot diagnostic
+  batch through one exclusive KFParticle transaction. It sizes and writes the
+  shared host SoA/event storage once, invokes `RunDecayPlanBatch()` once, and
+  splits raw/selected candidates and channel summaries back by the stable
+  event partitions returned by steering.
+- Empty/no-pair batches remain entirely CPU-side and do not attach XPU.
+  Per-event source identity and diagnostic failure isolation are retained even
+  if one batch execution fails.
+- Each Selector now owns a bounded collector with copied KFP inputs and CPU
+  lineage snapshots. It flushes on configured batch capacity, while `Reco`
+  flushes each thread-local collector after the timeslice event loop and before
+  taking the concise diagnostic report. Thus CPU reconstruction never retains
+  diagnostic references and its bitmap is ready before any GPU flush.
+- The current conservative limits are eight sampled events, 16k packed tracks,
+  64 vertices, 32k tasks/candidates/selected indices, and 64k daughter IDs.
+  An event too large for an empty batch is isolated as an input-rejected
+  diagnostic record; it cannot stall or alter CPU reconstruction.
+- Batch telemetry records size, queue wait, and capacity/end-of-timeslice/
+  oversized-event flush reason. Shared H2D/kernel/D2H timings are aggregated
+  once per batch, while CPU reference and comparison time remain per event.
+
+Stage 10.4 implementation notes:
+
+- Added the opt-in `KFParticleGpuXpuBatchBenchmark` beside the existing
+  standalone XPU lifecycle tests. It prepares deterministic, isolated
+  multi-event default-V0 input containing K0S, Lambda, and anti-Lambda track
+  pairs, warms the persistent storage outside the measurement, and compares
+  the serial and one-upload batch channel summaries before reporting success.
+- The executable prints one compact `METRIC` line for each mode. It reports
+  average wall, H2D, construction, selection, and D2H time per iteration plus
+  final raw/selected counts and overflow flags. Per-event content is never
+  printed unless a future diagnostic option explicitly requests it.
+- Run it with `GPU/test/run_xpu_batch_benchmark.sh` and the normal standalone
+  XPU environment. `KFPARTICLE_GPU_BATCH_BENCHMARK_EVENTS` (default `4`) and
+  `KFPARTICLE_GPU_BATCH_BENCHMARK_ITERATIONS` (default `10`) control one
+  case. `GPU/test/run_xpu_batch_benchmark_matrix.sh` first configures, builds,
+  and validates once, then executes the already built benchmark over the
+  default `1 2 4 8` event matrix (overridable through
+  `KFPARTICLE_GPU_BATCH_BENCHMARK_SIZES`). It writes compact evidence beside
+  its logs; `KFPARTICLE_GPU_BATCH_BENCHMARK_SKIP_VALIDATION=1` is available
+  only when that build has already been validated.
+- The next promotion gate is intentionally factual rather than aspirational:
+  retain diagnostics-only routing unless every tested batch size preserves the
+  serial channel summary with zero unexpected overflow and HIP shows a stable
+  throughput benefit at a representative batch size. Field-transport parity,
+  real-event validation, and any candidate-ownership change remain separate
+  decisions.
+- The standalone lifecycle now includes a two-event accepted-selection batch
+  regression. It uses a relaxed K0S selection configuration solely to isolate
+  compact-pool mechanics, and verifies non-empty per-event/per-channel ranges,
+  selected raw indices, event identity, and daughter source lineage. Physical
+  default-V0 selection remains covered by the existing default-V0 regression.
+- The HIP matrix evidence on `hip1` over `1, 2, 4, 8` events and 50 iterations
+  preserved serial-equivalent channel summaries with zero overflow. At eight
+  events it reduced total wall time from 20.591 ms to 19.601 ms per iteration;
+  the measured gain is dominated by one batch H2D/selection/D2H hand-off, not
+  by a claim of parallelised physics construction. The matrix script now runs
+  configure/build/lifecycle validation once before measuring all sizes.
+Step 8 is the standalone prerequisite.
 
 ### Step 8 completion audit and closure plan
 

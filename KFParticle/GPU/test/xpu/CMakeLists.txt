@@ -88,6 +88,20 @@ target_compile_definitions(KFParticleGpuXpuLifecycleTest
 target_link_libraries(KFParticleGpuXpuLifecycleTest
   PRIVATE xpu KFParticleGpuXpuBaseline KFParticleGpuXpuTestSupport)
 
+# This is an opt-in evidence tool rather than a fast CTest regression.  It
+# shares the lifecycle test's XPU image and hermetic runner, but reports
+# repeatable serial-versus-batch timings for controlled default-V0 input.
+add_executable(KFParticleGpuXpuBatchBenchmark
+  "${KFPARTICLE_GPU_DIR}/test/KFParticleGpuXpuBatchBenchmark.cxx"
+)
+set_target_properties(KFParticleGpuXpuBatchBenchmark PROPERTIES
+  BUILD_RPATH "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
+target_compile_options(KFParticleGpuXpuBatchBenchmark PRIVATE -Wall -Wextra -Werror)
+target_compile_definitions(KFParticleGpuXpuBatchBenchmark
+  PRIVATE KFPARTICLE_GPU_TEST_DEVICE="${KFPARTICLE_GPU_TEST_DEVICE}")
+target_link_libraries(KFParticleGpuXpuBatchBenchmark
+  PRIVATE xpu KFParticleGpuXpuBaseline KFParticleGpuXpuTestSupport)
+
 enable_testing()
 set(KFPARTICLE_GPU_XPU_TEST_ENV_SCRIPT
   "${CMAKE_CURRENT_LIST_DIR}/run_kfparticle_xpu_test_env.sh")
