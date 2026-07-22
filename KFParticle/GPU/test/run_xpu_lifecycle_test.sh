@@ -15,6 +15,7 @@ device="${KFPARTICLE_GPU_TEST_DEVICE:-cpu}"
 env_mode="${KFPARTICLE_GPU_TEST_ENV_MODE:-standalone}"
 diagnostics="${KFPARTICLE_GPU_TEST_DIAGNOSTICS:-0}"
 quiet_build="${KFPARTICLE_GPU_TEST_QUIET_BUILD:-1}"
+run_batch_benchmark="${KFPARTICLE_GPU_RUN_BATCH_BENCHMARK:-0}"
 log_dir="${build_dir}/logs"
 
 mkdir -p "${log_dir}"
@@ -296,14 +297,26 @@ else
   )
 
   echo "Test project ${build_dir}"
+  test_total=2
+  if [[ "${run_batch_benchmark}" != "0" ]]; then
+    test_total=3
+  fi
+
   run_standard_test \
-    1 2 \
+    1 "${test_total}" \
     "KFParticleGpuXpuBaselineTest" \
     "minimal XPU image preload, queue launch, and marker readback" \
     "${build_dir}/bin/KFParticleGpuXpuBaselineTest"
   run_standard_test \
-    2 2 \
+    2 "${test_total}" \
     "KFParticleGpuXpuLifecycleTest" \
     "runtime, KFParticle image kernels, SoA buffers, upload/download, candidate pools" \
     "${build_dir}/bin/KFParticleGpuXpuLifecycleTest"
+  if [[ "${run_batch_benchmark}" != "0" ]]; then
+    run_standard_test \
+      3 "${test_total}" \
+      "KFParticleGpuXpuBatchBenchmark" \
+      "controlled default-V0 serial versus multi-event batch correctness and timing evidence" \
+      "${build_dir}/bin/KFParticleGpuXpuBatchBenchmark"
+  fi
 fi

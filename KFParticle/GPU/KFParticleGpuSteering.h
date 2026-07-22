@@ -26,6 +26,24 @@ namespace xpu
 {
   class queue;
 }
+
+/** Host wall-time of the ordered default-V0 queue sequence. */
+struct KFParticleGpuDecayPlanTiming {
+  double inputUploadMilliseconds = 0.;
+  double constructionMilliseconds = 0.;
+  double selectionMilliseconds = 0.;
+  double outputDownloadMilliseconds = 0.;
+};
+
+/** Stable partition of one multi-event decay-plan transaction. */
+struct KFParticleGpuDecayPlanEventResult {
+  unsigned int eventIndex = 0;
+  unsigned int channelOffset = 0;
+  unsigned int channelCount = 0;
+  KFParticleGpuCandidateRange candidates;
+  KFParticleGpuSelectedCandidateRange selectedCandidates;
+  unsigned int overflowFlags = 0;
+};
 #endif
 
 /**
@@ -59,7 +77,13 @@ class KFParticleGpuSteering
   const std::vector<KFParticleGpuTwoDaughterChannelResult>& RunDecayPlan(
     unsigned int eventIndex,
     unsigned int taskCapacity);
+  const std::vector<KFParticleGpuTwoDaughterChannelResult>& RunDecayPlanBatch(
+    unsigned int firstEventIndex,
+    unsigned int eventCount,
+    unsigned int taskCapacity);
   const std::vector<KFParticleGpuTwoDaughterChannelResult>& LastDecayPlanResults() const;
+  const std::vector<KFParticleGpuDecayPlanEventResult>& LastDecayPlanEventResults() const;
+  const KFParticleGpuDecayPlanTiming& LastDecayPlanTiming() const;
   const KFParticleGpuSelectedCandidateRange& LastDecayPlanSelectedCandidates() const;
   const std::vector<KFParticleGpuSelectedChannelRange>& LastDecayPlanSelectedChannels() const;
 #endif

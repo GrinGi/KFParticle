@@ -2835,6 +2835,35 @@ namespace
     events[1].TrackSet(SecondaryNegativeFirst).Species(Kaon) = KFParticleGpuRange(8, 2);
   }
 
+  void FillBatchSelectionFixture(KFParticleGpuBufferManager& buffers)
+  {
+    KFParticleGpuBufferCapacities requested = buffers.Capacities();
+    requested.tracks = requested.tracks > 4u ? requested.tracks : 4u;
+    requested.events = requested.events > 2u ? requested.events : 2u;
+    requested.candidates = requested.candidates > 2u ? requested.candidates : 2u;
+    requested.daughterIds = requested.daughterIds > 4u ? requested.daughterIds : 4u;
+    requested.selectedCandidates = requested.selectedCandidates > 2u ? requested.selectedCandidates : 2u;
+    buffers.EnsureCapacity(requested);
+    buffers.SetInputSizes(4u, 0u, 2u);
+
+    KFParticleGpuInputTrackSoAView tracks = buffers.HostInputTracks();
+    StoreSyntheticTrack(tracks, 0u, -0.2f, 0.1f, 0.f, 0.8f, 0.1f, 1.f, 211, 1, 4101);
+    StoreSyntheticTrack(tracks, 1u, 0.1f, 0.5f, -0.4f, -0.3f, 0.7f, 1.1f, -211, -1, 4201);
+    StoreSyntheticTrack(tracks, 2u, -0.1f, -0.2f, 0.1f, 0.7f, 0.2f, 0.9f, 211, 1, 4301);
+    StoreSyntheticTrack(tracks, 3u, 0.2f, 0.4f, -0.3f, -0.2f, 0.6f, 1.0f, -211, -1, 4401);
+
+    KFParticleGpuEventDesc* events = buffers.HostEvents();
+    for (unsigned int event = 0u; event < 2u; ++event) {
+      const unsigned int offset = 2u * event;
+      events[event] = KFParticleGpuEventDesc();
+      events[event].eventId = 191u + event;
+      events[event].TrackSet(SecondaryPositiveFirst).tracks = KFParticleGpuRange(offset, 1u);
+      events[event].TrackSet(SecondaryPositiveFirst).Species(Pion) = KFParticleGpuRange(offset, 1u);
+      events[event].TrackSet(SecondaryNegativeFirst).tracks = KFParticleGpuRange(offset + 1u, 1u);
+      events[event].TrackSet(SecondaryNegativeFirst).Species(Pion) = KFParticleGpuRange(offset + 1u, 1u);
+    }
+  }
+
   void TestSteeringTwoDaughterStage(KFParticleGpuRuntime& runtime,
                                     KFParticleGpuBufferManager& buffers)
   {
@@ -4047,6 +4076,156 @@ namespace
          "decay plan executor appends multiple channels with non-overlapping output ranges");
   }
 
+  void TestDecayPlanBatchExecutor(KFParticleGpuRuntime& runtime,
+                                  KFParticleGpuBufferManager& buffers)
+  {
+    KFParticleGpuSteering& steering = runtime.GetSteering();
+    KFParticleGpuDecayPlan& plan = steering.GetDecayPlan();
+    plan.Clear();
+    plan.AddTwoDaughterChannel(MakePionPairChannel(91u));
+    plan.AddTwoDaughterChannel(MakeKaonPairChannel(92u));
+
+    FillDecayPlanMultiEventFixture(buffers);
+    KFParticleGpuBufferCapacities requested = buffers.Capacities();
+    requested.candidates = requested.candidates > 10u ? requested.candidates : 10u;
+    requested.daughterIds = requested.daughterIds > 18u ? requested.daughterIds : 18u;
+    requested.selectedCandidates = requested.selectedCandidates > 10u ? requested.selectedCandidates : 10u;
+    buffers.EnsureCapacity(requested);
+
+    const std::vector<KFParticleGpuTwoDaughterChannelResult> serialFirst =
+      steering.RunDecayPlan(0u, 4u);
+    const std::vector<KFParticleGpuTwoDaughterChannelResult> serialSecond =
+      steering.RunDecayPlan(1u, 4u);
+    const unsigned int serialFirstCandidates =
+      serialFirst[0u].candidates.size + serialFirst[1u].candidates.size;
+    const unsigned int serialFirstDaughters =
+      serialFirst[0u].candidates.daughterSize + serialFirst[1u].candidates.daughterSize;
+    const unsigned int serialSecondCandidates =
+      serialSecond[0u].candidates.size + serialSecond[1u].candidates.size;
+    const unsigned int serialSecondDaughters =
+      serialSecond[0u].candidates.daughterSize + serialSecond[1u].candidates.daughterSize;
+
+    FillDecayPlanMultiEventFixture(buffers);
+    const std::vector<KFParticleGpuTwoDaughterChannelResult>& batch =
+      steering.RunDecayPlanBatch(0u, 2u, 4u);
+    const std::vector<KFParticleGpuDecayPlanEventResult>& events =
+      steering.LastDecayPlanEventResults();
+
+    assert(batch.size() == 4u);
+    assert(events.size() == 2u);
+    assert(events[0].eventIndex == 0u);
+    assert(events[0].channelOffset == 0u);
+    assert(events[0].channelCount == 2u);
+    assert(events[0].candidates.offset == 0u);
+    assert(events[0].candidates.size == serialFirstCandidates);
+    assert(events[0].candidates.daughterOffset == 0u);
+    assert(events[0].candidates.daughterSize == serialFirstDaughters);
+    assert(events[1].eventIndex == 1u);
+    assert(events[1].channelOffset == 2u);
+    assert(events[1].channelCount == 2u);
+    assert(events[1].candidates.offset == serialFirstCandidates);
+    assert(events[1].candidates.size == serialSecondCandidates);
+    assert(events[1].candidates.daughterOffset == serialFirstDaughters);
+    assert(events[1].candidates.daughterSize == serialSecondDaughters);
+
+    for (unsigned int channel = 0u; channel < 2u; ++channel) {
+      assert(batch[channel].eventIndex == 0u);
+      assert(batch[channel + 2u].eventIndex == 1u);
+      assert(batch[channel].totalPairs == serialFirst[channel].totalPairs);
+      assert(batch[channel].acceptedTasks == serialFirst[channel].acceptedTasks);
+      assert(batch[channel].candidates.size == serialFirst[channel].candidates.size);
+      assert(batch[channel + 2u].totalPairs == serialSecond[channel].totalPairs);
+      assert(batch[channel + 2u].acceptedTasks == serialSecond[channel].acceptedTasks);
+      assert(batch[channel + 2u].candidates.size == serialSecond[channel].candidates.size);
+    }
+
+    const KFParticleGpuConstCandidatePoolView candidates = MakeConstView(buffers.HostCandidates());
+    assert(candidates.Size() == serialFirstCandidates + serialSecondCandidates);
+    assert(candidates.Daughters().Size() == serialFirstDaughters + serialSecondDaughters);
+    for (unsigned int candidate = 0u; candidate < serialFirstCandidates; ++candidate) {
+      assert(candidates.Metadata().EventIndex(candidate) == 0u);
+    }
+    for (unsigned int candidate = serialFirstCandidates; candidate < candidates.Size(); ++candidate) {
+      assert(candidates.Metadata().EventIndex(candidate) == 1u);
+    }
+    assert(HasCandidateDaughters(candidates, 2501, 2601));
+    assert(HasCandidateDaughters(candidates, 2701, 2901));
+    assert(HasCandidateDaughters(candidates, 2801, 3001));
+    assert(steering.LastDecayPlanSelectedChannels().size() == 4u);
+
+    plan.Clear();
+    Pass("decay-plan-batch-executor",
+         "one upload executes two isolated event/channel plans with stable event ranges and serial-equivalent lineage");
+  }
+
+  void TestDecayPlanBatchSelectedOutput(KFParticleGpuRuntime& runtime,
+                                        KFParticleGpuBufferManager& buffers)
+  {
+    KFParticleGpuSteering& steering = runtime.GetSteering();
+    KFParticleGpuDecayPlan& plan = steering.GetDecayPlan();
+    plan.Clear();
+    KFParticleGpuTwoDaughterChannel channel = MakeK0ShortToPiPlusPiMinusChannel(93u);
+    // Isolate compact-output partitioning from physics cuts: the default
+    // descriptor and daughter identity remain intact, while both events must
+    // contribute one accepted compact index.
+    channel.secondaryMassSigmaCut = -1.f;
+    channel.maxSecondaryTopoChi2PerNdf = -1.f;
+    channel.minSecondaryLdL = -1.f;
+    channel.selection.expectedMass = 1.f;
+    channel.selection.expectedMassSigma = -1.f;
+    channel.selection.massSigmaCut = -1.f;
+    channel.selection.maxGeometricChi2PerNdf = -1.f;
+    channel.selection.maxPrimaryVertexDistance = -1.f;
+    channel.selection.minSecondaryLdL = -1.f;
+    channel.selection.maxPrimaryTopologyChi2PerNdf = -1.f;
+    channel.selection.maxSecondaryTopologyChi2PerNdf = -1.f;
+    channel.selection.requirePrimaryVertex = 0u;
+    plan.AddTwoDaughterChannel(channel);
+
+    FillBatchSelectionFixture(buffers);
+    const std::vector<KFParticleGpuTwoDaughterChannelResult> serialFirst =
+      steering.RunDecayPlan(0u, 1u);
+    const unsigned int serialFirstSelected = steering.LastDecayPlanSelectedCandidates().size;
+    FillBatchSelectionFixture(buffers);
+    const std::vector<KFParticleGpuTwoDaughterChannelResult> serialSecond =
+      steering.RunDecayPlan(1u, 1u);
+    const unsigned int serialSecondSelected = steering.LastDecayPlanSelectedCandidates().size;
+
+    FillBatchSelectionFixture(buffers);
+    const std::vector<KFParticleGpuTwoDaughterChannelResult>& batch =
+      steering.RunDecayPlanBatch(0u, 2u, 1u);
+    const std::vector<KFParticleGpuDecayPlanEventResult>& events =
+      steering.LastDecayPlanEventResults();
+    const std::vector<KFParticleGpuSelectedChannelRange>& ranges =
+      steering.LastDecayPlanSelectedChannels();
+    const KFParticleGpuConstSelectedCandidateIndexView selected =
+      MakeConstView(buffers.HostSelectedCandidates());
+    const KFParticleGpuConstCandidatePoolView candidates = MakeConstView(buffers.HostCandidates());
+
+    assert(serialFirst.size() == 1u && serialSecond.size() == 1u);
+    assert(serialFirstSelected == 1u && serialSecondSelected == 1u);
+    assert(batch.size() == 2u && events.size() == 2u && ranges.size() == 2u);
+    assert(selected.Size() == 2u && selected.OverflowFlags() == 0u);
+    for (unsigned int event = 0u; event < 2u; ++event) {
+      assert(batch[event].eventIndex == event);
+      assert(batch[event].candidates.size == 1u);
+      assert(events[event].selectedCandidates.size == 1u);
+      assert(ranges[event].eventIndex == event);
+      assert(ranges[event].channelId == 93u);
+      assert(ranges[event].candidates.size == 1u);
+      const unsigned int selectedIndex = ranges[event].candidates.offset;
+      const unsigned int candidateIndex = selected.Index(selectedIndex);
+      assert(candidates.Metadata().EventIndex(candidateIndex) == event);
+      assert(candidates.Metadata().ChannelId(candidateIndex) == 93u);
+      assert(candidates.Daughters().SourceId(candidates.Metadata().DaughterOffset(candidateIndex))
+             == (event == 0u ? 4101 : 4301));
+    }
+
+    plan.Clear();
+    Pass("decay-plan-batch-selected-output",
+         "two events retain non-empty compact selection ranges, event identity, and source lineage");
+  }
+
   void TestDecayPlanExecutorEdgeCases(KFParticleGpuRuntime& runtime,
                                       KFParticleGpuBufferManager& buffers)
   {
@@ -4465,6 +4644,8 @@ int main()
   TestDecayPlanSelectionMultiPvBoundary(runtime, buffers);
   TestDecayPlanMultiChannelExecutor(runtime, buffers);
   TestDecayPlanExecutorEdgeCases(runtime, buffers);
+  TestDecayPlanBatchExecutor(runtime, buffers);
+  TestDecayPlanBatchSelectedOutput(runtime, buffers);
   TestTwoDaughterSyntheticGrid(runtime, buffers);
   TestSelectionHelpers(buffers);
   FillInput(buffers, capacities);
