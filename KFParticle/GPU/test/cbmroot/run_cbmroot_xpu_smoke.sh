@@ -2,10 +2,7 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source_dir="${KFPARTICLE_CBMROOT_SOURCE_DIR:-${VMCWORKDIR:-}}"
-if [[ -z "${source_dir}" ]]; then
-  source_dir="$(cd "${script_dir}/../../../../../../" && pwd)"
-fi
+source_dir="$(cd "${script_dir}/../../../../../../" && pwd)"
 
 build_dir="${KFPARTICLE_CBMROOT_BUILD_DIR:-$(cd "${source_dir}/.." && pwd)/build}"
 library_dir="${build_dir}/lib"
@@ -13,6 +10,14 @@ device="${KFPARTICLE_CBMROOT_DEVICE:-hip1}"
 log_dir="${KFPARTICLE_CBMROOT_SMOKE_LOG_DIR:-${build_dir}/kfparticle-cbmroot-xpu-smoke}"
 root_bin="${ROOTSYS:+${ROOTSYS}/bin/root}"
 root_bin="${root_bin:-$(command -v root || true)}"
+
+if [[ -r "${build_dir}/CMakeCache.txt" ]]; then
+  configured_source="$(sed -n 's|^CMAKE_HOME_DIRECTORY:INTERNAL=||p' "${build_dir}/CMakeCache.txt" | head -n 1)"
+  if [[ -n "${configured_source}" && "$(cd "${configured_source}" && pwd)" != "${source_dir}" ]]; then
+    echo "FAIL cbmroot-xpu-runtime - build/source mismatch: ${build_dir} was configured from ${configured_source}, script belongs to ${source_dir}" >&2
+    exit 2
+  fi
+fi
 
 if [[ -z "${root_bin}" || ! -x "${root_bin}" ]]; then
   echo "FAIL cbmroot-xpu-runtime - ROOT executable was not found" >&2

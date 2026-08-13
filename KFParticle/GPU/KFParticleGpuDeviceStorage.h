@@ -12,8 +12,13 @@
 #define KFPARTICLEGPUDEVICESTORAGE_H
 
 #include "KFParticleGpuCandidatePool.h"
+#include "KFParticleGpuChannelRouting.h"
+#include "KFParticleGpuDecayGraph.h"
+#include "KFParticleGpuGraphOperations.h"
 #include "KFParticleGpuInputData.h"
 #include "KFParticleGpuTwoDaughter.h"
+#include "KFParticleGpuTwoDaughterRouting.h"
+#include "KFParticleGpuV0Track.h"
 
 #ifdef KFPARTICLE_USE_XPU
 #include <xpu/host.h>
@@ -50,6 +55,79 @@ class KFParticleGpuDeviceStorage
   xpu::buffer<unsigned int> fTwoDaughterTotalPairCount;
   xpu::buffer<unsigned int> fTwoDaughterTaskOverflowFlags;
 
+  // Step 16 mask-routed first-generation worklist and bounded status.
+  xpu::buffer<KFParticleGpuTwoDaughterRoutedTask> fTwoDaughterRoutedTasks;
+  xpu::buffer<unsigned int> fTwoDaughterRoutingVisitedPairCount;
+  xpu::buffer<unsigned int> fTwoDaughterRoutingActiveBitCount;
+  xpu::buffer<unsigned int> fTwoDaughterRoutedAcceptedTaskCount;
+  xpu::buffer<unsigned int> fTwoDaughterRoutedStoredTaskCount;
+  xpu::buffer<unsigned int> fTwoDaughterRoutingBlockReservationCount;
+  xpu::buffer<unsigned int> fTwoDaughterRoutedTaskOverflowFlags;
+
+  // Revision-owned two-daughter descriptors and channel monitoring.
+  xpu::buffer<KFParticleGpuTwoDaughterRoutingDescriptor> fTwoDaughterRoutingDescriptors;
+  xpu::buffer<KFParticleGpuTwoDaughterCompatibilityEntry> fTwoDaughterRoutingCompatibility;
+  xpu::buffer<KFParticleGpuTwoDaughterExecutionGroup> fTwoDaughterRoutingGroups;
+  xpu::buffer<KFParticleGpuChannelMask> fTwoDaughterRoutingEnabledChannels;
+  xpu::buffer<unsigned int> fTwoDaughterRoutingChannelVisitedCounters;
+  xpu::buffer<unsigned int> fTwoDaughterRoutingChannelAcceptedCounters;
+  xpu::buffer<unsigned int> fTwoDaughterRoutingChannelStoredCounters;
+  xpu::buffer<unsigned int> fTwoDaughterRoutingChannelConstructedCounters;
+  xpu::buffer<unsigned int> fTwoDaughterSelectionAcceptedCounters;
+  xpu::buffer<unsigned int> fTwoDaughterSelectionStoredCounters;
+  xpu::buffer<unsigned int> fTwoDaughterSelectionOffsets;
+  xpu::buffer<unsigned int> fTwoDaughterSelectionCursors;
+
+  // Compact second-generation worklist. Entries reference raw V0 candidates
+  // and packed bachelor tracks; no V0 fit state is copied into this buffer.
+  xpu::buffer<KFParticleGpuV0TrackTask> fV0TrackTasks;
+  xpu::buffer<unsigned int> fV0TrackTaskCount;
+  xpu::buffer<unsigned int> fV0TrackTotalPairCount;
+  xpu::buffer<unsigned int> fV0TrackTaskOverflowFlags;
+
+  // Mask-routed work items retain only descriptor and source indices. The
+  // route and construction kernels consume this pool in one queue sequence.
+  xpu::buffer<KFParticleGpuV0TrackRoutedTask> fV0TrackRoutedTasks;
+  xpu::buffer<unsigned int> fV0TrackRoutingVisitedPairCount;
+  xpu::buffer<unsigned int> fV0TrackRoutingActiveBitCount;
+  xpu::buffer<unsigned int> fV0TrackRoutedAcceptedTaskCount;
+  xpu::buffer<unsigned int> fV0TrackRoutedStoredTaskCount;
+  xpu::buffer<unsigned int> fV0TrackRoutingBlockReservationCount;
+  xpu::buffer<unsigned int> fV0TrackRoutedTaskOverflowFlags;
+
+  // Plan-revision data for mask-driven cascade routing. These buffers are
+  // uploaded once per decay-plan change, not once per event.
+  xpu::buffer<KFParticleGpuV0TrackRoutingDescriptor> fV0TrackRoutingDescriptors;
+  xpu::buffer<KFParticleGpuV0TrackCompatibilityEntry> fV0TrackRoutingCompatibility;
+  xpu::buffer<KFParticleGpuV0TrackExecutionGroup> fV0TrackRoutingGroups;
+  xpu::buffer<KFParticleGpuChannelMask> fV0TrackRoutingEnabledChannels;
+  xpu::buffer<unsigned int> fV0TrackRoutingChannelVisitedCounters;
+  xpu::buffer<unsigned int> fV0TrackRoutingChannelAcceptedCounters;
+  xpu::buffer<unsigned int> fV0TrackRoutingChannelStoredCounters;
+  xpu::buffer<unsigned int> fV0TrackRoutingChannelConstructedCounters;
+
+  // Revision-owned graph contract consumed by the ordered generation scheduler.
+  xpu::buffer<KFParticleGpuGraphNode> fDecayGraphNodes;
+  xpu::buffer<KFParticleGpuGraphExecutionGroup> fDecayGraphGroups;
+  xpu::buffer<KFParticleGpuGraphFamilyCoverage> fDecayGraphFamilyCoverage;
+
+  // Stage 17 later-generation scheduler. Descriptors are revision-owned;
+  // tasks, results, and counters are reused for every ordered graph group.
+  xpu::buffer<KFParticleGpuGraphOperationDescriptor> fGraphOperationDescriptors;
+  xpu::buffer<KFParticleGpuGraphOperationTask> fGraphOperationTasks;
+  xpu::buffer<KFParticleGpuGraphOperationResult> fGraphOperationResults;
+  xpu::buffer<unsigned int> fGraphOperationVisitedCombinations;
+  xpu::buffer<unsigned int> fGraphOperationAcceptedTasks;
+  xpu::buffer<unsigned int> fGraphOperationStoredTasks;
+  xpu::buffer<unsigned int> fGraphOperationConstructedCandidates;
+  xpu::buffer<unsigned int> fGraphOperationRejectedTasks;
+  xpu::buffer<unsigned int> fGraphOperationOverflowFlags;
+  xpu::buffer<unsigned int> fGraphOperationChannelVisitedCounters;
+  xpu::buffer<unsigned int> fGraphOperationChannelAcceptedCounters;
+  xpu::buffer<unsigned int> fGraphOperationChannelStoredCounters;
+  xpu::buffer<unsigned int> fGraphOperationChannelConstructedCounters;
+  xpu::buffer<unsigned int> fGraphOperationChannelRejectedCounters;
+
   // Diagnostic raw output retained for downstream device stages and debugging.
   xpu::buffer<float> fCandidateParameters;
   xpu::buffer<float> fCandidateCovariances;
@@ -57,6 +135,8 @@ class KFParticleGpuDeviceStorage
   xpu::buffer<int> fCandidateFitIntegers;
   xpu::buffer<int> fCandidateMetadataIntegers;
   xpu::buffer<unsigned int> fCandidateMetadataUnsigned;
+  // Transient descriptor index for O(1) device-side selection lookup.
+  xpu::buffer<unsigned int> fCandidateRoutingDescriptorIndices;
   xpu::buffer<int> fDaughterSourceIds;
   xpu::buffer<unsigned int> fCandidateSize;
   xpu::buffer<unsigned int> fDaughterSize;

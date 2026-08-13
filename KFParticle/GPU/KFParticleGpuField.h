@@ -70,6 +70,9 @@ class KFParticleGpuFieldRegion
 
   KFPARTICLE_GPU_HOST_DEVICE KFParticleGpuFieldValue Get(float z) const
   {
+#if defined(__clang__)
+#pragma clang fp contract(off)
+#endif
     const float dz = z - fCoefficients[9];
     const float dz2 = dz * dz;
     return KFParticleGpuFieldValue(fCoefficients[0] + fCoefficients[1] * dz + fCoefficients[2] * dz2,

@@ -111,7 +111,7 @@ write_evidence() {
 
 write_evidence
 
-echo "PASS cbmroot-kfp-gpu-campaign - baseline remains diagnostic-free, diagnostic run reports GPU telemetry"
+echo "PASS cbmroot-kfp-gpu-campaign - baseline remains diagnostic-free, diagnostic run reports GPU monitoring"
 if [[ -n "${baseline_output}" ]]; then
   echo "PASS cbmroot-kfp-gpu-campaign-output - CPU output files are byte-identical"
 fi

@@ -48,4 +48,13 @@ KFPARTICLE_GPU_HOST_DEVICE inline float KFParticleGpuCos(float value)
 #endif
 }
 
+KFPARTICLE_GPU_HOST_DEVICE inline float KFParticleGpuRint(float value)
+{
+#ifdef KFPARTICLE_GPU_XPU_ENABLED
+  return xpu::rint(value);
+#else
+  return std::rint(value);
+#endif
+}
+
 #endif

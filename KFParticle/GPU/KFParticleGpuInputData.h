@@ -57,8 +57,40 @@ enum KFParticleGpuTrackSpecies
   Triton,
   Helium3,
   Helium4,
+  Helium6,
+  Lithium6,
+  Lithium7,
+  Beryllium7,
   NumberOfTrackSpecies
 };
+
+KFPARTICLE_GPU_HOST_DEVICE inline unsigned int KFParticleGpuGraphTrackSourceId(
+  KFParticleGpuTrackSet set,
+  KFParticleGpuTrackSpecies species)
+{
+  return 1u + static_cast<unsigned int>(set)
+    * (static_cast<unsigned int>(NumberOfTrackSpecies) + 1u)
+    + static_cast<unsigned int>(species);
+}
+
+KFPARTICLE_GPU_HOST_DEVICE inline bool KFParticleGpuDecodeGraphTrackSourceId(
+  unsigned int sourceId,
+  KFParticleGpuTrackSet& set,
+  KFParticleGpuTrackSpecies& species)
+{
+  if (sourceId == 0u) return false;
+  const unsigned int value = sourceId - 1u;
+  const unsigned int stride = static_cast<unsigned int>(NumberOfTrackSpecies) + 1u;
+  const unsigned int setIndex = value / stride;
+  const unsigned int speciesIndex = value % stride;
+  if (setIndex >= static_cast<unsigned int>(NumberOfTrackSets)
+      || speciesIndex > static_cast<unsigned int>(NumberOfTrackSpecies)) {
+    return false;
+  }
+  set = static_cast<KFParticleGpuTrackSet>(setIndex);
+  species = static_cast<KFParticleGpuTrackSpecies>(speciesIndex);
+  return true;
+}
 
 /**
  * Absolute ranges of one CPU KFPTrackVector after packing into shared SoA.
@@ -87,8 +119,12 @@ struct KFParticleGpuEventDesc
   unsigned int eventId;
   KFParticleGpuTrackSetDesc trackSets[NumberOfTrackSets];
   KFParticleGpuRange primaryVertices;
+  float minSecondaryTrackChiToPrimaryVertex;
 
-  KFPARTICLE_GPU_HOST_DEVICE KFParticleGpuEventDesc() : eventId(0), trackSets(), primaryVertices() {}
+  KFPARTICLE_GPU_HOST_DEVICE KFParticleGpuEventDesc()
+    : eventId(0), trackSets(), primaryVertices(), minSecondaryTrackChiToPrimaryVertex(-1.f)
+  {
+  }
 
   KFPARTICLE_GPU_HOST_DEVICE const KFParticleGpuTrackSetDesc& TrackSet(KFParticleGpuTrackSet value) const
   {

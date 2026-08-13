@@ -9,7 +9,8 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 set(KFPARTICLE_GPU_TEST_DEVICE "cpu" CACHE STRING "XPU device used by the KFParticle GPU lifecycle test")
 set(KFPARTICLE_GPU_TEST_ENV_MODE "standalone" CACHE STRING "Environment mode used by the KFParticle GPU XPU tests")
-set(KFPARTICLE_GPU_TEST_TRACE OFF CACHE BOOL "Print verbose KFParticle GPU steering trace in XPU tests")
+set(KFPARTICLE_GPU_SOURCE_FINGERPRINT "unversioned" CACHE STRING
+  "Content identity used to invalidate copied KFParticle GPU sources")
 
 if(NOT DEFINED XPU_ENABLE_OPENMP)
   set(XPU_ENABLE_OPENMP OFF CACHE BOOL "")
@@ -55,9 +56,12 @@ target_link_libraries(KFParticleGpuXpuBaselineTest PRIVATE xpu KFParticleGpuXpuB
 
 add_library(KFParticleGpuXpuTestSupport SHARED
   "${KFPARTICLE_GPU_DIR}/KFParticleGpuBufferManager.cxx"
+  "${KFPARTICLE_GPU_DIR}/KFParticleGpuCpuChannelCatalogue.cxx"
+  "${KFPARTICLE_GPU_DIR}/KFParticleGpuDecayGraphPlan.cxx"
   "${KFPARTICLE_GPU_DIR}/KFParticleGpuDecayPlan.cxx"
   "${KFPARTICLE_GPU_DIR}/KFParticleGpuDeviceImage.cxx"
   "${KFPARTICLE_GPU_DIR}/KFParticleGpuKernels.cxx"
+  "${KFPARTICLE_GPU_DIR}/KFParticleGpuRoutingPlan.cxx"
   "${KFPARTICLE_GPU_DIR}/KFParticleGpuRuntime.cxx"
   "${KFPARTICLE_GPU_DIR}/KFParticleGpuSteering.cxx"
 )
@@ -65,10 +69,7 @@ set_target_properties(KFParticleGpuXpuTestSupport PROPERTIES
   BUILD_RPATH "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
 target_compile_definitions(KFParticleGpuXpuTestSupport
   PUBLIC KFPARTICLE_USE_XPU
-  PRIVATE KFPARTICLE_GPU_USE_KERNEL_ARGS)
-if(KFPARTICLE_GPU_TEST_TRACE)
-  target_compile_definitions(KFParticleGpuXpuTestSupport PRIVATE KFPARTICLE_GPU_TRACE)
-endif()
+  PRIVATE KFPARTICLE_GPU_SOURCE_FINGERPRINT="${KFPARTICLE_GPU_SOURCE_FINGERPRINT}")
 target_include_directories(KFParticleGpuXpuTestSupport PUBLIC "${KFPARTICLE_GPU_DIR}")
 target_compile_options(KFParticleGpuXpuTestSupport PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(KFParticleGpuXpuTestSupport PUBLIC xpu)
@@ -84,7 +85,9 @@ set_target_properties(KFParticleGpuXpuLifecycleTest PROPERTIES
   BUILD_RPATH "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
 target_compile_options(KFParticleGpuXpuLifecycleTest PRIVATE -Wall -Wextra -Werror)
 target_compile_definitions(KFParticleGpuXpuLifecycleTest
-  PRIVATE KFPARTICLE_GPU_TEST_DEVICE="${KFPARTICLE_GPU_TEST_DEVICE}")
+  PRIVATE
+    KFPARTICLE_GPU_TEST_DEVICE="${KFPARTICLE_GPU_TEST_DEVICE}"
+    KFPARTICLE_GPU_SOURCE_FINGERPRINT="${KFPARTICLE_GPU_SOURCE_FINGERPRINT}")
 target_link_libraries(KFParticleGpuXpuLifecycleTest
   PRIVATE xpu KFParticleGpuXpuBaseline KFParticleGpuXpuTestSupport)
 
@@ -98,7 +101,9 @@ set_target_properties(KFParticleGpuXpuBatchBenchmark PROPERTIES
   BUILD_RPATH "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
 target_compile_options(KFParticleGpuXpuBatchBenchmark PRIVATE -Wall -Wextra -Werror)
 target_compile_definitions(KFParticleGpuXpuBatchBenchmark
-  PRIVATE KFPARTICLE_GPU_TEST_DEVICE="${KFPARTICLE_GPU_TEST_DEVICE}")
+  PRIVATE
+    KFPARTICLE_GPU_TEST_DEVICE="${KFPARTICLE_GPU_TEST_DEVICE}"
+    KFPARTICLE_GPU_SOURCE_FINGERPRINT="${KFPARTICLE_GPU_SOURCE_FINGERPRINT}")
 target_link_libraries(KFParticleGpuXpuBatchBenchmark
   PRIVATE xpu KFParticleGpuXpuBaseline KFParticleGpuXpuTestSupport)
 

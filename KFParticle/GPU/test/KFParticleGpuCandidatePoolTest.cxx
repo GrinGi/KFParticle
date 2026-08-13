@@ -8,7 +8,7 @@
  * (at your option) any later version.
  */
 
-#include "KFParticleGpuCandidateTransfer.h"
+#include "KFParticleGpuParity.h"
 
 #include <cassert>
 #include <type_traits>
@@ -60,6 +60,15 @@ namespace
     pool.Metadata().DaughterOffset(1) = 3;
     pool.Metadata().DaughterCount(1) = 2;
     pool.Metadata().Flags(1) = 0;
+    pool.Metadata().ChannelId(1) = 17u;
+    pool.Metadata().Topology(1) = KFGpuGraphTopologyCompositeTrack;
+    pool.Metadata().OutputClass(1) = KFGpuGraphOutputSecondary;
+    pool.Metadata().OperationStatus(1) = KFGpuCandidateOperationAccepted;
+    pool.Metadata().DirectDaughterCount(1) = 2u;
+    SetCandidateDirectDaughter(
+      pool.Metadata(), 1u, 0u, KFGpuDirectDaughterCandidate, 0u);
+    SetCandidateDirectDaughter(
+      pool.Metadata(), 1u, 1u, KFGpuDirectDaughterInputTrack, 3u);
     pool.Daughters().SourceId(3) = 101;
     pool.Daughters().SourceId(4) = 205;
     candidateSize = 2;
@@ -79,9 +88,29 @@ namespace
     assert(constPool.Metadata().EventIndex(1) == 7);
     assert(constPool.Metadata().DaughterOffset(1) == 3);
     assert(constPool.Metadata().DaughterCount(1) == 2);
+    assert(constPool.Metadata().Topology(1) == KFGpuGraphTopologyCompositeTrack);
+    assert(constPool.Metadata().OutputClass(1) == KFGpuGraphOutputSecondary);
+    assert(constPool.Metadata().OperationStatus(1) == KFGpuCandidateOperationAccepted);
+    assert(constPool.Metadata().DirectDaughterCount(1) == 2u);
+    assert(constPool.Metadata().DirectFirstKind(1) == KFGpuDirectDaughterCandidate);
+    assert(constPool.Metadata().DirectFirstIndex(1) == 0u);
+    assert(constPool.Metadata().DirectSecondKind(1) == KFGpuDirectDaughterInputTrack);
+    assert(constPool.Metadata().DirectSecondIndex(1) == 3u);
     assert(constPool.Daughters().SourceId(3) == 101);
     assert(constPool.Daughters().SourceId(4) == 205);
     assert(constPool.Daughters().Size() == 5);
+
+    KFParticleGpuParitySnapshot snapshot;
+    assert(KFParticleGpuParity::BuildSnapshot(
+      constPool, 1u, 91u, nullptr, false, snapshot));
+    assert(snapshot.key.eventId == 91u);
+    assert(snapshot.key.channelId == 17u);
+    assert(snapshot.key.lineageSize == 2u);
+    assert(snapshot.key.lineage[0] == 101);
+    assert(snapshot.key.lineage[1] == 205);
+    assert(snapshot.topology == KFGpuGraphTopologyCompositeTrack);
+    assert(snapshot.outputClass == KFGpuGraphOutputSecondary);
+    assert(snapshot.operationStatus == KFGpuCandidateOperationAccepted);
 
     // Component-major metadata keeps adjacent candidates adjacent in memory.
     assert(metadataIntegers[KFParticleGpuCandidateMetadataLayout::Pdg * capacity + 1] == 3122);

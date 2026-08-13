@@ -40,7 +40,8 @@ enum KFParticleGpuV0SelectionRejection
   KFGpuV0SelectionRejectDecayLength = 1u << 5,
   KFGpuV0SelectionRejectMass = 1u << 6,
   KFGpuV0SelectionRejectTopology = 1u << 7,
-  KFGpuV0SelectionRejectOutputOverflow = 1u << 8
+  KFGpuV0SelectionRejectOutputOverflow = 1u << 8,
+  KFGpuV0SelectionRejectPointing = 1u << 9
 };
 
 /**
@@ -73,6 +74,7 @@ struct KFParticleGpuV0SelectionResult
   int bestPrimaryVertexIndex = -1;
   unsigned int selectionClass = KFGpuV0SelectionNotEvaluated;
   unsigned int rejectionReasons = KFGpuV0SelectionRejectNone;
+  unsigned int topologyStatus = 0u;
   KFParticleGpuV0SelectionObservables observables;
 };
 
@@ -129,7 +131,44 @@ struct KFParticleGpuPrimaryVertexTopologyObservables
   unsigned int valid = 0u;
 };
 
+/**
+ * Bounded default-V0 publication topology matching the historical CPU
+ * GetDistanceToVertexLine()/SetProductionVertex()/GetDecayLength sequence.
+ * "Line" remains in the API name for compatibility; the CPU distance is the
+ * ordinary three-dimensional decay-vertex-to-PV displacement.
+ */
+enum KFParticleGpuV0LineTopologyStatus
+{
+  KFGpuV0LineTopologyNone = 0u,
+  KFGpuV0LineTopologyValid = 1u << 0,
+  KFGpuV0LineTopologyNonFinite = 1u << 1,
+  KFGpuV0LineTopologyDegenerateMomentum = 1u << 2,
+  KFGpuV0LineTopologyDegenerateCovariance = 1u << 3
+};
+
+struct KFParticleGpuV0LineTopologyResult
+{
+  int primaryVertexIndex = -1;
+  float lineDistance = 0.f;
+  float lineDistanceError = 1.e8f;
+  float lineLdL = 0.f;
+  float pathToPrimaryVertex = 0.f;
+  float decayLength = 0.f;
+  float decayLengthError = 1.e8f;
+  float decayLdL = 0.f;
+  float pointingCosine = 0.f;
+  float lineChi2PerNdf = 1.e8f;
+  unsigned int status = KFGpuV0LineTopologyNone;
+};
+
 /** Per-channel selection thresholds; negative floating limits disable a cut. */
+enum KFParticleGpuV0TopologyMode
+{
+  // Retained diagnostic baseline until the line route is fully qualified.
+  KFGpuV0TopologySpatial = 0,
+  KFGpuV0TopologyLine = 1
+};
+
 struct KFParticleGpuV0SelectionConfig
 {
   float expectedMass = 0.f;
@@ -141,6 +180,7 @@ struct KFParticleGpuV0SelectionConfig
   float maxPrimaryTopologyChi2PerNdf = -1.f;
   float maxSecondaryTopologyChi2PerNdf = -1.f;
   unsigned int requirePrimaryVertex = 0u;
+  int topologyMode = KFGpuV0TopologySpatial;
 };
 
 enum KFParticleGpuSelectedCandidateOverflow
@@ -331,6 +371,192 @@ namespace KFParticleGpuSelection
     return IsFiniteValue(candidate.Chi2());
   }
 
+  KFPARTICLE_GPU_HOST_DEVICE inline void ResetLineTopology(
+    KFParticleGpuV0LineTopologyResult& result)
+  {
+    result = KFParticleGpuV0LineTopologyResult();
+  }
+
+  KFPARTICLE_GPU_HOST_DEVICE inline bool BuildV0LineTopology(
+    const KFParticleGpuFitState& candidate,
+    const KFParticleGpuVertexState& primaryVertex,
+    KFParticleGpuV0LineTopologyResult& result)
+  {
+    ResetLineTopology(result);
+    if (!IsFiniteFitState(candidate) || !IsFiniteValue(primaryVertex.X())
+        || !IsFiniteValue(primaryVertex.Y()) || !IsFiniteValue(primaryVertex.Z())) {
+      result.status = KFGpuV0LineTopologyNonFinite;
+      return false;
+    }
+
+    const float px = candidate.Px();
+    const float py = candidate.Py();
+    const float pz = candidate.Pz();
+    const float momentum2 = px * px + py * py + pz * pz;
+
+    // Despite its historical name, CPU GetDistanceToVertexLine() measures
+    // the ordinary decay-vertex-to-PV displacement, not a perpendicular to
+    // the momentum line. Preserve the CPU sign convention for the pointing
+    // test: dx points from the decay vertex to the primary vertex.
+    const float dx = primaryVertex.X() - candidate.X();
+    const float dy = primaryVertex.Y() - candidate.Y();
+    const float dz = primaryVertex.Z() - candidate.Z();
+    const float distance2 = dx * dx + dy * dy + dz * dz;
+    if (!IsFiniteValue(momentum2) || !IsFiniteValue(distance2)) {
+      result.status = KFGpuV0LineTopologyNonFinite;
+      return false;
+    }
+    if (momentum2 <= 1.e-16f) {
+      result.status = KFGpuV0LineTopologyDegenerateMomentum;
+      return false;
+    }
+
+    const float c00 = candidate.Covariance(0, 0) + primaryVertex.Covariance(0);
+    const float c10 = candidate.Covariance(1, 0) + primaryVertex.Covariance(1);
+    const float c11 = candidate.Covariance(1, 1) + primaryVertex.Covariance(2);
+    const float c20 = candidate.Covariance(2, 0) + primaryVertex.Covariance(3);
+    const float c21 = candidate.Covariance(2, 1) + primaryVertex.Covariance(4);
+    const float c22 = candidate.Covariance(2, 2) + primaryVertex.Covariance(5);
+    result.lineDistance = distance2 > 1.e-16f ? KFParticleGpuSqrt(distance2) : 1.e-8f;
+    result.pathToPrimaryVertex = momentum2 > 1.e-16f
+                                   ? -(dx * px + dy * py + dz * pz) / momentum2 : 0.f;
+    const float momentum = momentum2 > 1.e-16f ? KFParticleGpuSqrt(momentum2) : 0.f;
+    result.pointingCosine = result.lineDistance > 1.e-8f && momentum > 1.e-8f
+                              ? -(dx * px + dy * py + dz * pz)
+                                  / (result.lineDistance * momentum)
+                              : 0.f;
+
+    const float distanceVariance = c00 * dx * dx + c11 * dy * dy + c22 * dz * dz
+                                   + 2.f * (c10 * dx * dy + c20 * dx * dz
+                                           + c21 * dy * dz);
+    const bool degenerateLineCovariance =
+      !IsFiniteValue(distanceVariance) || distanceVariance < 0.f;
+    if (!degenerateLineCovariance) {
+      result.lineDistanceError = KFParticleGpuSqrt(distanceVariance) / result.lineDistance;
+      result.lineLdL = result.lineDistanceError < 1.e7f
+                          ? result.lineDistance / result.lineDistanceError : 0.f;
+    }
+    // CPU GetDistanceToVertexLine() keeps the geometric distance usable when
+    // its projected covariance is invalid and reports a sentinel error.  Do
+    // the same here: the subsequent constrained decay-length and pointing
+    // checks still carry valid selection information for this PV.
+
+    KFParticleGpuFitState constrained = candidate;
+    if (!KFParticleGpuMath::SetNeutralProductionVertex(constrained, primaryVertex)
+        || !KFParticleGpuMath::GetDecayLength(
+          constrained, result.decayLength, result.decayLengthError)) {
+      result.status = KFGpuV0LineTopologyDegenerateCovariance;
+      return false;
+    }
+    result.decayLdL = result.decayLengthError > 0.f
+                        ? result.decayLength / result.decayLengthError : 0.f;
+
+    const float determinant = c00 * (c11 * c22 - c21 * c21)
+                              - c10 * (c10 * c22 - c20 * c21)
+                              + c20 * (c10 * c21 - c20 * c11);
+    if (IsFiniteValue(determinant) && determinant > 1.e-12f) {
+      const float inverse00 = (c11 * c22 - c21 * c21) / determinant;
+      const float inverse10 = (c20 * c21 - c10 * c22) / determinant;
+      const float inverse20 = (c10 * c21 - c20 * c11) / determinant;
+      const float inverse11 = (c00 * c22 - c20 * c20) / determinant;
+      const float inverse21 = (c10 * c20 - c00 * c21) / determinant;
+      const float inverse22 = (c00 * c11 - c10 * c10) / determinant;
+      const float chi2 = dx * dx * inverse00 + dy * dy * inverse11 + dz * dz * inverse22
+                         + 2.f * (dx * dy * inverse10 + dx * dz * inverse20
+                                  + dy * dz * inverse21);
+      if (IsFiniteValue(chi2) && chi2 >= 0.f) {
+        result.lineChi2PerNdf = chi2 / 3.f;
+      }
+    }
+    result.status = KFGpuV0LineTopologyValid;
+    if (degenerateLineCovariance) {
+      result.status |= KFGpuV0LineTopologyDegenerateCovariance;
+    }
+    return true;
+  }
+
+  KFPARTICLE_GPU_HOST_DEVICE inline bool FindBestV0LineTopology(
+    const KFParticleGpuFitState& candidate,
+    const KFParticleGpuConstVertexSoAView& primaryVertices,
+    const KFParticleGpuRange& vertexRange,
+    KFParticleGpuV0LineTopologyResult& bestResult)
+  {
+    ResetLineTopology(bestResult);
+    if (vertexRange.size == 0u || vertexRange.offset > primaryVertices.Size()
+        || vertexRange.size > primaryVertices.Size() - vertexRange.offset) {
+      return false;
+    }
+
+    for (unsigned int localIndex = 0u; localIndex < vertexRange.size; ++localIndex) {
+      const unsigned int vertexIndex = vertexRange.offset + localIndex;
+      KFParticleGpuVertexState vertex;
+      LoadVertexState(primaryVertices, vertexIndex, vertex);
+      KFParticleGpuV0LineTopologyResult current;
+      if (!BuildV0LineTopology(candidate, vertex, current)) {
+        continue;
+      }
+      current.primaryVertexIndex = static_cast<int>(vertexIndex);
+      if ((bestResult.status & KFGpuV0LineTopologyValid) == 0u
+          || current.lineChi2PerNdf < bestResult.lineChi2PerNdf) {
+        bestResult = current;
+      }
+    }
+    return (bestResult.status & KFGpuV0LineTopologyValid) != 0u;
+  }
+
+  KFPARTICLE_GPU_HOST_DEVICE inline bool FindNearestV0LineTopology(
+    const KFParticleGpuFitState& candidate,
+    const KFParticleGpuConstVertexSoAView& primaryVertices,
+    const KFParticleGpuRange& vertexRange,
+    KFParticleGpuV0LineTopologyResult& nearestResult)
+  {
+    ResetLineTopology(nearestResult);
+    if (vertexRange.size == 0u || vertexRange.offset > primaryVertices.Size()
+        || vertexRange.size > primaryVertices.Size() - vertexRange.offset) {
+      return false;
+    }
+
+    for (unsigned int localIndex = 0u; localIndex < vertexRange.size; ++localIndex) {
+      const unsigned int vertexIndex = vertexRange.offset + localIndex;
+      KFParticleGpuVertexState vertex;
+      LoadVertexState(primaryVertices, vertexIndex, vertex);
+      KFParticleGpuV0LineTopologyResult current;
+      if (!BuildV0LineTopology(candidate, vertex, current)) {
+        continue;
+      }
+      current.primaryVertexIndex = static_cast<int>(vertexIndex);
+      if ((nearestResult.status & KFGpuV0LineTopologyValid) == 0u
+          || current.lineDistance < nearestResult.lineDistance) {
+        nearestResult = current;
+      }
+    }
+    return (nearestResult.status & KFGpuV0LineTopologyValid) != 0u;
+  }
+
+  KFPARTICLE_GPU_HOST_DEVICE inline bool PointsFromAnyPrimaryVertex(
+    const KFParticleGpuFitState& candidate,
+    const KFParticleGpuConstVertexSoAView& primaryVertices,
+    const KFParticleGpuRange& vertexRange)
+  {
+    if (vertexRange.size == 0u || vertexRange.offset > primaryVertices.Size()
+        || vertexRange.size > primaryVertices.Size() - vertexRange.offset) {
+      return false;
+    }
+    for (unsigned int localIndex = 0u; localIndex < vertexRange.size; ++localIndex) {
+      KFParticleGpuVertexState vertex;
+      LoadVertexState(primaryVertices, vertexRange.offset + localIndex, vertex);
+      KFParticleGpuV0LineTopologyResult topology;
+      if (!BuildV0LineTopology(candidate, vertex, topology)) { continue; }
+      // CPU GetDistanceToVertexLine accepts a candidate which is compatible
+      // with the PV within 3 sigma or whose momentum points away from it.
+      if (topology.lineDistance < 3.f * topology.lineDistanceError
+          || topology.pointingCosine > 0.f) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   KFPARTICLE_GPU_HOST_DEVICE inline bool BuildPrimaryVertexTopologyObservables(
     const KFParticleGpuFitState& candidate,
     const KFParticleGpuVertexState& primaryVertex,
@@ -478,6 +704,55 @@ namespace KFParticleGpuSelection
     int nearestPrimaryVertexIndex = -1;
     int bestPrimaryVertexIndex = -1;
 
+    if (needsPrimaryVertex && config.topologyMode == KFGpuV0TopologyLine) {
+      KFParticleGpuV0LineTopologyResult nearestLine;
+      KFParticleGpuV0LineTopologyResult bestLine;
+      const bool nearestFound = FindNearestV0LineTopology(
+        candidate, primaryVertices, vertexRange, nearestLine);
+      const bool bestFound = FindBestV0LineTopology(
+        candidate, primaryVertices, vertexRange, bestLine);
+      result.topologyStatus = bestFound ? bestLine.status : nearestLine.status;
+      if (!nearestFound || !bestFound) {
+        result.rejectionReasons |= KFGpuV0SelectionRejectNoPrimaryVertex;
+        return;
+      }
+      if (!PointsFromAnyPrimaryVertex(candidate, primaryVertices, vertexRange)) {
+        result.rejectionReasons |= KFGpuV0SelectionRejectPointing;
+      }
+
+      result.bestPrimaryVertexIndex = bestLine.primaryVertexIndex;
+      result.observables.nearestPrimaryVertexDistance = nearestLine.lineDistance;
+      result.observables.nearestPrimaryVertexDistanceError = nearestLine.lineDistanceError;
+      result.observables.nearestPrimaryVertexLdL = nearestLine.lineLdL;
+      result.observables.bestPrimaryVertexTopoChi2PerNdf = bestLine.lineChi2PerNdf;
+      result.observables.bestPrimaryVertexDecayLength = nearestLine.decayLength;
+      result.observables.bestPrimaryVertexDecayLengthError = nearestLine.decayLengthError;
+      result.observables.bestPrimaryVertexLdL = nearestLine.decayLdL;
+
+      if (config.maxPrimaryVertexDistance >= 0.f
+          && nearestLine.lineDistance >= config.maxPrimaryVertexDistance) {
+        result.rejectionReasons |= KFGpuV0SelectionRejectDistance;
+      }
+      const bool primary = config.maxPrimaryTopologyChi2PerNdf >= 0.f
+                           && bestLine.lineChi2PerNdf < config.maxPrimaryTopologyChi2PerNdf;
+      if (!primary && config.minSecondaryLdL >= 0.f
+          && nearestLine.decayLdL <= config.minSecondaryLdL) {
+        result.rejectionReasons |= KFGpuV0SelectionRejectDecayLength;
+      }
+      if (!primary && config.maxSecondaryTopologyChi2PerNdf >= 0.f
+          && bestLine.lineChi2PerNdf >= config.maxSecondaryTopologyChi2PerNdf) {
+        result.rejectionReasons |= KFGpuV0SelectionRejectTopology;
+      }
+      if (result.rejectionReasons == KFGpuV0SelectionRejectNone) {
+        result.selectionClass = primary ? KFGpuV0SelectionPrimary : KFGpuV0SelectionSecondary;
+      }
+      return;
+    }
+    if (needsPrimaryVertex && config.topologyMode != KFGpuV0TopologySpatial) {
+      result.rejectionReasons |= KFGpuV0SelectionRejectTopology;
+      return;
+    }
+
     if (needsPrimaryVertex && vertexRange.size > 0u && vertexRange.offset <= primaryVertices.Size()
         && vertexRange.size <= primaryVertices.Size() - vertexRange.offset) {
       for (unsigned int localIndex = 0; localIndex < vertexRange.size; ++localIndex) {
@@ -575,7 +850,9 @@ namespace KFParticleGpuSelection
   KFPARTICLE_GPU_HOST_DEVICE inline bool PassChi2PerNdf(const KFParticleGpuFitState& particle,
                                                         float maxChi2PerNdf)
   {
-    return maxChi2PerNdf < 0.f || Chi2PerNdf(particle) <= maxChi2PerNdf;
+    const float chi2PerNdf = Chi2PerNdf(particle);
+    return KFParticleGpuMath::IsFinite(chi2PerNdf)
+           && (maxChi2PerNdf < 0.f || chi2PerNdf <= maxChi2PerNdf);
   }
 
   KFPARTICLE_GPU_HOST_DEVICE inline bool PassMassWindow(const KFParticleGpuFitState& particle,
