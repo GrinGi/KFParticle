@@ -319,6 +319,8 @@ public:
   const float &GetSumDaughterMass() const {
     return SumDaughterMass;
   } ///< Returns the sum of masses of the daughters.
+  void SetSFromDecay(float value) { fSFromDecay = value; }
+  void SetSumDaughterMass(float value) { SumDaughterMass = value; }
 
   //*
   //* CONSTRUCTION OF THE PARTICLE BY ITS DAUGHTERS AND MOTHER

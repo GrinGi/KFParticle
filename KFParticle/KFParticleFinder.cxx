@@ -28,6 +28,35 @@ using std::vector;
 #include "KFParticleDatabase.h"
 #include "KFPEmcCluster.h"
 
+#include <algorithm>
+#include <array>
+#include <cstdlib>
+#include <iostream>
+#include <string>
+
+namespace
+{
+  constexpr const char* kCpuFinderRoutingTraceBuildId = "20260806-cpu-finder-routing-v16";
+
+  bool TraceCpuFinderPair(int firstSourceId, int secondSourceId)
+  {
+    const char* requested = std::getenv("KFPARTICLE_CPU_FINDER_TRACE_PAIRS");
+    if (requested == nullptr || requested[0] == '\0') { return false; }
+    const int lower = std::min(firstSourceId, secondSourceId);
+    const int upper = std::max(firstSourceId, secondSourceId);
+    const std::string list = std::string(";") + requested + ";";
+    const std::string key = ";" + std::to_string(lower) + "," + std::to_string(upper) + ";";
+    return list.find(key) != std::string::npos;
+  }
+
+  bool CompactCpuFinderTrace()
+  {
+    const char* compact = std::getenv("KFPARTICLE_GPU_DEEP_TRACE_COMPACT");
+    return compact != nullptr && std::string(compact) != "0"
+           && std::string(compact) != "OFF";
+  }
+}
+
 KFParticleFinder::KFParticleFinder():
   fNPV(-1),fNThreads(1),fDistanceCut(1.f),fLCut(-5.f),fCutCharmPt(0.2f),fCutCharmChiPrim(85.f),fCutLVMPt(0.0f),fCutLVMP(0.0f),fCutJPsiPt(1.0f),
   fD0(0), fD0bar(0), fD04(0), fD04bar(0), fD0KK(0), fD0pipi(0), fDPlus(0), fDMinus(0), 
@@ -801,6 +830,55 @@ inline void KFParticleFinder::ConstructV0(KFPTrackVector* vTracks,
 #endif
   const KFParticleSIMD* vDaughtersPointer[2] = {&negDaughter, &posDaughter};
   mother.Construct(vDaughtersPointer, 2, 0);
+
+  std::array<int, SimdLen> tracePosSource{};
+  std::array<int, SimdLen> traceNegSource{};
+  std::array<bool, SimdLen> traceLane{};
+  bool traceBatch = false;
+  for (unsigned int lane = 0; lane < NTracks; ++lane) {
+    const int posParticleId = vTracks[iTrTypePos].Id()[idPosDaughters[lane]];
+    const int negParticleId = vTracks[iTrTypeNeg].Id()[idNegDaughters[lane]];
+    if (posParticleId >= 0 && static_cast<std::size_t>(posParticleId) < Particles.size()
+        && Particles[static_cast<std::size_t>(posParticleId)].NDaughters() == 1) {
+      tracePosSource[lane] = Particles[static_cast<std::size_t>(posParticleId)].DaughterIds()[0];
+    }
+    if (negParticleId >= 0 && static_cast<std::size_t>(negParticleId) < Particles.size()
+        && Particles[static_cast<std::size_t>(negParticleId)].NDaughters() == 1) {
+      traceNegSource[lane] = Particles[static_cast<std::size_t>(negParticleId)].DaughterIds()[0];
+    }
+    traceLane[lane] = TraceCpuFinderPair(tracePosSource[lane], traceNegSource[lane]);
+    traceBatch = traceBatch || traceLane[lane];
+  }
+
+  auto traceStage = [&](const char* stage,
+                        const mask32_v& mask,
+                        const float32_v* line,
+                        const float32_v* lineOverError,
+                        const mask32_v* pointsFromVertex) {
+    if (!traceBatch) { return; }
+    for (unsigned int lane = 0; lane < NTracks; ++lane) {
+      if (!traceLane[lane]) { continue; }
+      std::cout << "KFP_CPU_FINDER_TRACE stage=" << stage
+                << " lane=" << lane
+                << " source=" << tracePosSource[lane] << ',' << traceNegSource[lane]
+                << " sorted=" << idPosDaughters[lane] << ',' << idNegDaughters[lane]
+                << " daughter_pdg=" << daughterPosPDG[lane] << ',' << daughterNegPDG[lane]
+                << " mother_pdg=" << mother.PDG()[lane]
+                << " active=" << mask[lane]
+                << " chi2=" << mother.GetChi2()[lane]
+                << " ndf=" << mother.GetNDF()[lane]
+                << " chi2_ndf=" << mother.GetChi2()[lane] / static_cast<float>(mother.GetNDF()[lane])
+                << " chi2_cut=" << cuts[1]
+                << " ldl_cut=" << cuts[2]
+                << " l_cut=" << fLCut;
+      if (line != nullptr) { std::cout << " line=" << (*line)[lane]; }
+      if (lineOverError != nullptr) { std::cout << " ldl=" << (*lineOverError)[lane]; }
+      if (pointsFromVertex != nullptr) {
+        std::cout << " points_from_vertex=" << (*pointsFromVertex)[lane];
+      }
+      std::cout << '\n';
+    }
+  };
   
   mask32_v saveParticle = int32_v::indicesSequence() < int(NTracks);
   float32_v chi2Cut = cuts[1];
@@ -816,6 +894,8 @@ inline void KFParticleFinder::ConstructV0(KFPTrackVector* vTracks,
   saveParticle &= isFinite(mother.GetChi2());
   saveParticle &= (mother.GetChi2() > 0.0f);
   saveParticle &= (mother.GetChi2() == mother.GetChi2());
+
+  traceStage("fit", saveParticle, nullptr, nullptr, nullptr);
 
   if( saveParticle.isEmpty() ) return;
   
@@ -834,6 +914,7 @@ inline void KFParticleFinder::ConstructV0(KFPTrackVector* vTracks,
   }
 
   saveParticle &= (lMin < 200.f);
+  traceStage("line", saveParticle, &lMin, &ldlMin, &isParticleFromVertex);
 #ifdef NonhomogeneousField  
   KFParticleSIMD motherTopo;
     ldlMin = 1.e8f;
@@ -849,6 +930,7 @@ inline void KFParticleFinder::ConstructV0(KFPTrackVector* vTracks,
   saveParticle &= ( ((!isPrimary) && ldlMin > ldlCut) || isPrimary );
   
   saveParticle &= ((!isPrimary) && isParticleFromVertex) || isPrimary;
+  traceStage("ldl-pointing", saveParticle, &lMin, &ldlMin, &isParticleFromVertex);
   if( saveParticle.isEmpty() ) return;
   
   const mask32_v isK0     = saveParticle && (mother.PDG() == int32_v(310));
@@ -857,6 +939,7 @@ inline void KFParticleFinder::ConstructV0(KFPTrackVector* vTracks,
   const mask32_v isHyperNuclei = saveParticle && (abs(mother.PDG()) > 3000 && abs(mother.PDG()) < 3104);
   
   saveParticle &= ( ((isK0 || isLambda || isHyperNuclei) && lMin > float32_v(fLCut)) || !(isK0 || isLambda || isHyperNuclei) );
+  traceStage("lcut-final", saveParticle, &lMin, &ldlMin, &isParticleFromVertex);
 
   mask32_v saveMother;
   
@@ -1135,6 +1218,59 @@ void KFParticleFinder::Find2DaughterDecay(KFPTrackVector* vTracks, kfvector_floa
   
   int trTypeIndexPos[2] = {0,2};
   int trTypeIndexNeg[2] = {1,3};
+  const char* tracePairs = std::getenv("KFPARTICLE_CPU_FINDER_TRACE_PAIRS");
+  const bool traceCpuFinderRouting = tracePairs != nullptr && tracePairs[0] != '\0';
+
+  auto sourceId = [&](int trackSet, int sortedIndex) {
+    if (sortedIndex < 0 || sortedIndex >= vTracks[trackSet].Size()) { return -1; }
+    const int particleId = vTracks[trackSet].Id()[sortedIndex];
+    if (particleId < 0 || static_cast<std::size_t>(particleId) >= Particles.size()) { return -1; }
+    const auto& particle = Particles[static_cast<std::size_t>(particleId)];
+    return particle.NDaughters() == 1 ? particle.DaughterIds()[0] : -1;
+  };
+
+  auto traceRouting = [&](const char* stage,
+                          int trackSetPos,
+                          int trackSetNeg,
+                          int posIndex,
+                          int negIndex,
+                          int category,
+                          int rotation,
+                          int lane,
+                          bool active,
+                          int posPdg,
+                          int negPdg,
+                          int motherPdg,
+                          float chiPos,
+                          float chiNeg,
+                          float distance,
+                          float momentumDot,
+                          float posMomentum2,
+                          float negMomentum2) {
+    if (!traceCpuFinderRouting) { return; }
+    if (CompactCpuFinderTrace() && std::string(stage) != "chi"
+        && std::string(stage) != "queue") {
+      return;
+    }
+    const int posSource = sourceId(trackSetPos, posIndex);
+    const int negSource = sourceId(trackSetNeg, negIndex);
+    if (!TraceCpuFinderPair(posSource, negSource)) { return; }
+    std::cout << "KFP_CPU_ROUTING_TRACE build_id=" << kCpuFinderRoutingTraceBuildId
+              << " stage=" << stage
+              << " source=" << posSource << ',' << negSource
+              << " sets=" << trackSetPos << ',' << trackSetNeg
+              << " sorted=" << posIndex << ',' << negIndex
+              << " category=" << category << " rotation=" << rotation << " lane=" << lane
+              << " active=" << active
+              << " daughter_pdg=" << posPdg << ',' << negPdg
+              << " mother_pdg=" << motherPdg
+              << " chi_to_pv=" << chiPos << ',' << chiNeg
+              << " chi_cut=" << fCuts2D[0]
+              << " distance=" << distance << " distance_cut=" << fDistanceCut
+              << " momentum_dot=" << momentumDot
+              << " pos_p2=" << posMomentum2 << " neg_p2=" << negMomentum2
+              << " buffer_size=" << nBufEntry << '\n';
+  };
 
   for( int iTrTypeNeg = 0; iTrTypeNeg<2; iTrTypeNeg++)
   {
@@ -1269,6 +1405,16 @@ void KFParticleFinder::Find2DaughterDecay(KFPTrackVector* vTracks, kfvector_floa
               const mask32_v& isPrimary   = ( negPVIndex >= 0 ) && (!isPosSecondary);
             
               const mask32_v closeDaughters = (activeNeg && (int32_v::indicesSequence() < int32_v(NTracks)));
+
+              if (traceCpuFinderRouting) {
+                for (int lane = 0; lane < SimdLen; ++lane) {
+                  traceRouting("close",
+                               trTypeIndexPos[iTrTypePos], trTypeIndexNeg[iTrTypeNeg],
+                               iTrP + lane, negInd[lane], iTC, iRot, lane,
+                               closeDaughters[lane], posPDG[lane], trackPdgNeg[lane], -1,
+                               chiPrimPos[lane], chiPrimNeg[lane], -1.f, 0.f, 0.f, 0.f);
+                }
+              }
               
               if(closeDaughters.isEmpty() && (iTC != 0)) continue;
               
@@ -1311,6 +1457,15 @@ void KFParticleFinder::Find2DaughterDecay(KFPTrackVector* vTracks, kfvector_floa
 
               for(int iPDGPos=0; iPDGPos<nPDGPos; iPDGPos++)
               {
+                if (traceCpuFinderRouting) {
+                  for (int lane = 0; lane < SimdLen; ++lane) {
+                    traceRouting("hypothesis",
+                                 trTypeIndexPos[iTrTypePos], trTypeIndexNeg[iTrTypeNeg],
+                                 iTrP + lane, negInd[lane], iTC, iRot, lane,
+                                 active[iPDGPos][lane], trackPdgPos[iPDGPos][lane], trackPdgNeg[lane], -1,
+                                 chiPrimPos[lane], chiPrimNeg[lane], -1.f, 0.f, 0.f, 0.f);
+                  }
+                }
                 if(active[iPDGPos].isEmpty()) continue;
                 
                 //detetrmine a pdg code of the mother particle
@@ -1407,6 +1562,16 @@ void KFParticleFinder::Find2DaughterDecay(KFPTrackVector* vTracks, kfvector_floa
                   chiprimCut = select( abs(motherPDG) == 421 || abs(motherPDG) == 426, fCutCharmChiPrim, chiprimCut);
                   active[iPDGPos] &= (chiPrimNeg > chiprimCut && chiPrimPos > chiprimCut);
                 }
+
+                if (traceCpuFinderRouting) {
+                  for (int lane = 0; lane < SimdLen; ++lane) {
+                    traceRouting("chi",
+                                 trTypeIndexPos[iTrTypePos], trTypeIndexNeg[iTrTypeNeg],
+                                 iTrP + lane, negInd[lane], iTC, iRot, lane,
+                                 active[iPDGPos][lane], trackPdgPos[iPDGPos][lane], trackPdgNeg[lane], motherPDG[lane],
+                                 chiPrimPos[lane], chiPrimNeg[lane], -1.f, 0.f, 0.f, 0.f);
+                  }
+                }
                 
                 active[iPDGPos] &= (motherPDG != -1);
                 if(!(fDecayReconstructionList.empty()))
@@ -1421,6 +1586,15 @@ void KFParticleFinder::Find2DaughterDecay(KFPTrackVector* vTracks, kfvector_floa
                   }
                   motherPDG.load(motherPdgArray);
                   active[iPDGPos] &= (motherPDG != -1);
+                }
+                if (traceCpuFinderRouting) {
+                  for (int lane = 0; lane < SimdLen; ++lane) {
+                    traceRouting("decay-list",
+                                 trTypeIndexPos[iTrTypePos], trTypeIndexNeg[iTrTypeNeg],
+                                 iTrP + lane, negInd[lane], iTC, iRot, lane,
+                                 active[iPDGPos][lane], trackPdgPos[iPDGPos][lane], trackPdgNeg[lane], motherPDG[lane],
+                                 chiPrimPos[lane], chiPrimNeg[lane], -1.f, 0.f, 0.f, 0.f);
+                  }
                 }
                 if(active[iPDGPos].isEmpty()) continue;
 
@@ -1437,6 +1611,15 @@ void KFParticleFinder::Find2DaughterDecay(KFPTrackVector* vTracks, kfvector_floa
                   float32_v dr = sqrt(dx*dx+dy*dy+dz*dz);
 
                   active[iPDGPos] &= (dr < float32_v(fDistanceCut));
+                  if (traceCpuFinderRouting) {
+                    for (int lane = 0; lane < SimdLen; ++lane) {
+                      traceRouting("distance",
+                                   trTypeIndexPos[iTrTypePos], trTypeIndexNeg[iTrTypeNeg],
+                                   iTrP + lane, negInd[lane], iTC, iRot, lane,
+                                   active[iPDGPos][lane], trackPdgPos[iPDGPos][lane], trackPdgNeg[lane], motherPDG[lane],
+                                   chiPrimPos[lane], chiPrimNeg[lane], dr[lane], 0.f, 0.f, 0.f);
+                    }
+                  }
                   if(active[iPDGPos].isEmpty()) continue;
                   
                   float32_v p1p2 = posParameters[3]*negParameters[3] + posParameters[4]*negParameters[4] + posParameters[5]*negParameters[5];
@@ -1444,6 +1627,15 @@ void KFParticleFinder::Find2DaughterDecay(KFPTrackVector* vTracks, kfvector_floa
                   float32_v p22  = negParameters[3]*negParameters[3] + negParameters[4]*negParameters[4] + negParameters[5]*negParameters[5];
                   active[iPDGPos] &= (p1p2 > -p12);
                   active[iPDGPos] &= (p1p2 > -p22);
+                  if (traceCpuFinderRouting) {
+                    for (int lane = 0; lane < SimdLen; ++lane) {
+                      traceRouting("momentum",
+                                   trTypeIndexPos[iTrTypePos], trTypeIndexNeg[iTrTypeNeg],
+                                   iTrP + lane, negInd[lane], iTC, iRot, lane,
+                                   active[iPDGPos][lane], trackPdgPos[iPDGPos][lane], trackPdgNeg[lane], motherPDG[lane],
+                                   chiPrimPos[lane], chiPrimNeg[lane], dr[lane], p1p2[lane], p12[lane], p22[lane]);
+                    }
+                  }
                 }
                 
                 const float32_v& ptNeg2 = daughterNeg.Px()*daughterNeg.Px() + daughterNeg.Py()*daughterNeg.Py();
@@ -1457,8 +1649,28 @@ void KFParticleFinder::Find2DaughterDecay(KFPTrackVector* vTracks, kfvector_floa
                                       (negNPixelHits >= int32_v(3)) && (posNPixelHits >= int32_v(3)) )
                                     || (!(abs(motherPDG) == 421 || abs(motherPDG) == 426));
                 }
+
+                if (traceCpuFinderRouting) {
+                  for (int lane = 0; lane < SimdLen; ++lane) {
+                    traceRouting("final-cuts",
+                                 trTypeIndexPos[iTrTypePos], trTypeIndexNeg[iTrTypeNeg],
+                                 iTrP + lane, negInd[lane], iTC, iRot, lane,
+                                 active[iPDGPos][lane], trackPdgPos[iPDGPos][lane], trackPdgNeg[lane], motherPDG[lane],
+                                 chiPrimPos[lane], chiPrimNeg[lane], -1.f, 0.f, ptPos2[lane], ptNeg2[lane]);
+                  }
+                }
                 
                 if(active[iPDGPos].isEmpty()) continue;
+
+                if (traceCpuFinderRouting) {
+                  for (int lane = 0; lane < SimdLen; ++lane) {
+                    traceRouting("queue",
+                                 trTypeIndexPos[iTrTypePos], trTypeIndexNeg[iTrTypeNeg],
+                                 iTrP + lane, negInd[lane], iTC, iRot, lane,
+                                 active[iPDGPos][lane], trackPdgPos[iPDGPos][lane], trackPdgNeg[lane], motherPDG[lane],
+                                 chiPrimPos[lane], chiPrimNeg[lane], -1.f, 0.f, 0.f, 0.f);
+                  }
+                }
 
                 for(int iV=0; iV<SimdLen; iV++)
                 {

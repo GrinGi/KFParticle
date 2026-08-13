@@ -112,6 +112,7 @@ available. It remains inactive until the KFP selector YAML contains:
 kfp:
   selector:
     gpuDiagnostics:
+      mode: diagnostic
       samplePeriod: 1
 ```
 
@@ -128,6 +129,45 @@ builds the CPU reference and GPU observation, but its CPU bitmask is not added
 to `DigiEvent::fSelectionMask`. The diagnostic tail is isolated after CPU
 particle reconstruction: unexpected packing, comparison, or reporting errors
 are counted as failed diagnostics and cannot alter the CPU selection result.
+
+## Step 20 Qualified Routing
+
+The same optional block now selects one of three explicit modes:
+
+| `mode` | Behaviour |
+| --- | --- |
+| `cpu-only` | Run and publish the established CPU finder only |
+| `diagnostic` | Publish CPU output and compare an isolated GPU observation |
+| `qualified-gpu` | Prepared no-reference GPU route; locked to an event-atomic CPU fallback until Step 20.3 qualifies the exact mode/backend manifest |
+
+Omitting `gpuDiagnostics` remains the normal CPU-only default. Existing
+configurations that provide the block without `mode` retain `diagnostic`
+semantics.
+
+The first production capability manifest is deliberately narrower than the
+complete external GPU graph. It admits only the three default field-aware
+track-track V0 channels (K0S, Lambda, anti-Lambda), the
+construct/transport/select operation set, and the default CPU finder cuts.
+This prevents later graph work from becoming production-visible merely
+because its device kernels exist.
+
+`validated-gpu` remains a compatibility spelling for `qualified-gpu`.
+Stage 20.2 checks capability and the qualification lock before attaching to
+XPU. While the lock is closed, the ordinary CPU finder runs and no GPU output
+can be published. The prepared unlocked branch runs GPU before CPU, requires a
+complete materialized event, and publishes through one `ReplaceParticles()`
+swap. Any unsupported scope, invalid input or field, unavailable runtime,
+overflow, execution error, or materialization failure runs the complete CPU
+event instead. There is no partial CPU/GPU candidate merge. Diagnostic mode
+continues to run and compare both implementations.
+
+`GpuRoutingMonitor` records one deterministic reason per decision: GPU
+accepted, explicit CPU request, diagnostic-only, not sampled, qualification
+locked, unsupported
+capability, unavailable runtime, invalid input, invalid field, overflow,
+failed validation, failed materialization, or execution failure. CBMRoot
+prints these counters once per timeslice beside the existing diagnostic
+monitoring.
 
 ## Required Track Input
 
@@ -185,11 +225,21 @@ CBM nonhomogeneous field. If the CPU input was built without
 `NonhomogeneousField`, the field-aware default V0 route must be disabled or
 reported as unavailable instead of silently being compared as physics-equivalent.
 
-Current limitation: the validated first field-aware two-daughter algorithm
-evaluates the first daughter's field region at its current z and uses its `By`
-component in a constant-By DCA and energy-fit approximation. It transports the
-full ten coefficients through the input contract so the later nonhomogeneous
-transport can use them, but it is not yet equivalent to CPU `TransportCBM`.
+Current implementation: default V0 diagnostics use the full packed field
+region for each daughter during the bounded DCA/transport seed. The explicit
+`KFGpuTransportFieldAware` compatibility mode remains a constant-By baseline
+for diagnostics. The full-field energy-fit path still uses the validated
+line-DCA cross-daughter correlation approximation, so it is not yet equivalent
+to the complete CPU `TransportCBM` covariance contract.
+
+## Planned Full-Field Upgrade (Step 11)
+
+Step 11 keeps this input ABI and the process-local KFParticle queue unchanged.
+Its remaining work validates the full-field default-V0 diagnostic path through
+the CBMRoot boundary and records its cost. Missing, non-finite, or
+non-convergent field input is reported as `GpuDiagnosticStatus::FieldRejected`;
+it must never be silently treated as a physics-equivalent zero-field result.
+CPU reconstruction remains authoritative throughout this upgrade.
 
 ## Ownership And Event Sequence
 
@@ -252,9 +302,10 @@ raw selection-result view. It resolves, without copying fit data:
 | canonical daughter source IDs | raw daughter pool through metadata offset/count |
 | selection observables, class, rejection bits, best PV | raw selection-result record at that index |
 
-Selected-index order inside a channel is atomic-compaction order, not physics
-order. Queue-ordered channel launches make each channel's compact entries
-contiguous; `LastDecayPlanSelectedChannels()` publishes those ranges. CBMRoot
+Selected-index order inside a channel is atomic-scatter order, not physics
+order. The device prefix phase reserves one bounded segment per event and
+descriptor before scatter; `LastDecayPlanSelectedChannels()` publishes those
+ranges. CBMRoot
 comparison and later GPU stages must match by `(channel ID, event index, mother
 PDG, canonical daughter source IDs)`. A selected-output overflow means the
 selected list is incomplete even when raw construction did not overflow and
@@ -265,10 +316,257 @@ selection-record equality, deterministic equal-PV ties, an exact
 candidate-to-PV distance boundary, and selected-output truncation. These are
 the minimum comparison counters an initial CBMRoot adapter must preserve.
 
-The following remain CPU-only or approximate at this boundary: full
-`SetProductionVertex` compatibility, CPU `TransportCBM` equivalence, primary
-V0 extrapolation, higher-generation neutral-daughter/track-V0 reconstruction,
-and final CPU finder replacement.
+## Mask-Driven Continuation Contract (Steps 15+)
+
+The qualified default-V0 and Xi/Omega generations both use device-resident
+descriptor tables, role masks, compatibility lookup, and block-scan task
+compaction. Default-V0 selection continues directly from its shared raw
+generation through a descriptor-index sidecar.
+
+The integration boundary remains unchanged:
+
+- CBMRoot packs event/species ranges and physical metadata; it does not build
+  channel masks or launch individual decay channels.
+- KFParticle keeps descriptor tables, compatibility lookup data, task queues,
+  and intermediate candidate pools on the selected XPU device.
+- Range filtering happens before mask lookup. A routing kernel visits a pair
+  once per compatible source-range group and emits one task for every active
+  channel bit.
+- A channel bit is never persisted as physics identity. Tasks and candidates
+  retain the stable channel ID, event ID, and canonical source lineage used by
+  the current comparison gate.
+- Masks perform only discrete hypothesis routing. Field transport, DCA,
+  fitting, topology, and continuous cuts retain their validated numerical
+  paths and run only for compacted tasks.
+- Reconstruction remains an ordered pipeline per dependency generation, not
+  one monolithic kernel. The KFParticle-owned persistent queue provides the
+  generation barriers in standalone and embedded CBMRoot modes.
+
+The old explicit cascade route and the simple atomic fused route remain test
+oracles. Production cascade steering uses block-scan routing; this change does
+not itself enable replacement of the complete CPU finder.
+
+Step 15 is executed in three externally visible checkpoints:
+
+1. Routing masks, descriptors, execution groups, and the scalar oracle are
+   added without changing the active reconstruction path.
+2. A fused atomic-reference route is added and compared with the explicit
+   route on CPU and HIP. CBMRoot still observes the same stable channel IDs,
+   lineage, aggregate statuses, and diagnostic-only ownership.
+3. XPU block-scan compaction replaces per-task global reservations when its
+   measured result is beneficial, steering switches to generation/group
+   launches, and the CBMRoot cascade smoke closes the step.
+
+Descriptor and compatibility-table uploads are plan-revision operations, not
+event operations. CBMRoot is not responsible for their memory, bit numbering,
+or construction. Step 15 must not add a host wait between routing and candidate
+construction, and it must not require a CBMRoot source change outside the
+external KFParticle diagnostic harness.
+
+Step 15 implements this boundary without changing CBMRoot source outside the
+external diagnostic harness. `KFParticleGpuV0TrackRoutingPlan` compiles the host decay
+plan into flat descriptors, role compatibility entries, and two source-range
+execution groups for the current Xi/Omega channels. The resulting tables,
+enabled-channel mask, and counters are owned by
+`KFParticleGpuDeviceStorage`, uploaded only for a new decay-plan revision, and
+published as a non-owning kernel-state view. The lifecycle device probe checks
+that the same table is visible through XPU constant memory.
+
+Production consumes those tables through block-scan compaction and constructs
+one unordered event-level cascade generation in the KFParticle-owned queue,
+without a host synchronization between routing and construction. Stable
+channel IDs and canonical lineage remain the comparison keys. The atomic
+route and explicit scalar route are available only to qualification tests;
+neither queue ownership nor CBMRoot's XPU initialization contract changes.
+
+`LastV0TrackRoutingMonitorData()` exposes group launches, descriptor count,
+visited pairs, active bits, accepted/stored tasks, global block reservations,
+candidate/daughter counts, and overflow. `LastV0TrackCascadeResults()` exposes
+per-channel counters plus the shared generation range. Consumers must not
+infer channel membership from contiguous atomic output order.
+
+The following remain CPU-only or incomplete at this boundary: full
+`SetProductionVertex` compatibility, the remaining neutral-daughter and
+composite-composite channel families, complete final selection, and production
+CPU finder replacement.
+
+Step 15 status: complete (100%). Standalone CPU/HIP lifecycle validation, the
+controlled HIP routing benchmark, and the external CBMRoot cascade smoke gate
+all pass. This qualifies the mask-driven Xi/Omega generation without enabling
+production replacement of the complete CPU finder.
+
+Step 16 applies the same boundary to K0S, Lambda, and anti-Lambda in three
+checkpoints: a revision-owned two-daughter routing/selection ABI, an isolated
+fused raw-generation path, and a generation-wide selection continuation plus
+production steering switch. CBMRoot continues to provide only packed tracks,
+vertices, events, and field data. KFParticle compiles all masks and
+descriptors, owns the persistent task/candidate/selection buffers, and
+executes the ordered queue pipeline.
+
+The raw candidate retains its stable channel ID and uses only a transient
+device descriptor-index sidecar for O(1) selection-config lookup. This sidecar
+is not part of the public physics identity or CBMRoot comparison key. The
+explicit V0 path remains a qualification oracle. No CBMRoot source outside the
+external diagnostic/build integration was required for Step 16.
+
+Stage 16.1 implements that ABI entirely inside external KFParticle. The
+revision compiler validates and builds three default-V0 descriptors, role
+compatibility masks, and two charge/source execution groups. KFParticle owns
+the persistent XPU tables, routed-task/status storage, per-channel counters,
+and candidate descriptor-index sidecar; CBMRoot neither allocates nor uploads
+them. The lifecycle kernel-state probe confirms device visibility.
+
+Stage 16.2 added an external-KFParticle-only qualification transaction:
+`RunTwoDaughterFusedStage()` launches descriptor-mask routing followed by raw
+candidate construction on KFParticle's process-lifetime queue. Its routed
+pool, counters, candidate SoA, daughter lineage, and descriptor sidecar remain
+KFParticle-owned. The transaction has no route-to-construction host
+synchronization and compares its unordered default-V0 output against the
+explicit path.
+
+Stage 16.3 switches KFParticle production steering to the same generation-wide
+route. Selection resolves its immutable configuration through the
+KFParticle-owned descriptor sidecar and writes diagnostic records plus compact
+selected indices before the existing cascade continuation. CBMRoot still
+provides only packed tracks, vertices, events, and field coefficients; it does
+not own routing tables, task pools, selection workspace, or queue control.
+The public comparison key remains stable channel/event/source lineage, not raw
+candidate position.
+
+Step 16 status: complete (100%). Standalone CPU/HIP lifecycle validation, the
+controlled HIP batch benchmark matrix, CBMRoot XPU and diagnostic smoke tests,
+the hermetic CPU/GPU V0 equivalence gate, and cascade continuation tests all
+pass with the generation-wide production route.
+
+## Step 17 Integration Boundary
+
+Step 17 completes the supported decay graph inside external KFParticle in four
+checkpoints:
+
+1. compile a complete CPU-channel manifest into a flat, revision-owned graph
+   contract without changing active execution;
+2. add generic charged track-track and track-composite generations;
+3. add composite-composite, neutral or missing-mass, projection, matching, and
+   final-selection operations;
+4. execute and audit the complete supported graph on the persistent
+   KFParticle queue.
+
+CBMRoot remains an input and diagnostic adapter throughout this step. It
+provides packed tracks, vertices, events, field coefficients, and optional
+detector inputs already present in its reconstruction boundary. It does not
+allocate graph descriptors, routing masks, task pools, candidate pools,
+selection workspaces, or XPU queues. Those objects remain visible in
+KFParticle's device-storage owner and are uploaded only when the graph revision
+or storage capacity changes.
+
+The scheduler may order dependent generations on the queue, but it must not
+download counters or wait on the host between graph nodes. Missing optional
+inputs and unimplemented operations produce an explicit unsupported-channel
+status before execution. They must not trigger an implicit CPU call from
+inside the GPU graph.
+
+Each checkpoint keeps the current standalone CPU/HIP lifecycle gates. The
+fourth checkpoint also runs the batch benchmark and the external CBMRoot XPU
+and diagnostic smoke gates. Step 17 does not switch normal CBMRoot
+reconstruction to GPU output; materialization, exhaustive physics parity, and
+controlled fallback belong to Step 18.
+
+Stage 17.1 is implemented entirely inside external KFParticle. The flat graph
+contract inventories nine CPU finder families and maps the currently
+validated default-V0 and Xi/Omega channels into seven generation-ordered
+nodes. Three persistent XPU buffers store graph nodes, execution groups, and
+family coverage. CBMRoot neither allocates nor uploads them.
+
+The graph compiler rejects omitted families, duplicate channel or family IDs,
+invalid source topology, forward candidate dependencies, unsupported
+operation contracts, invalid support reasons, and insufficient configured
+capacity before any queue operation. The content-derived revision makes an
+unchanged upload a no-op. The graph view is visible through the KFParticle
+constant-memory state.
+
+Stage 17.2 keeps the CBMRoot boundary unchanged while activating the charged
+part of this contract inside `RunDecayPlan()`. KFParticle compiles and uploads
+the graph revision, resolves graph payload kinds to resident two-track and
+composite-track descriptor tables, and runs both generations on its own
+queue. CBMRoot still supplies only packed tracks, vertices, event ranges, and
+field coefficients.
+
+Composite inputs are qualified by stable parent channel ID as well as parent
+PDG. A CBMRoot event may enable several equal-PDG hypotheses, but the next GPU
+generation consumes only the output declared by its graph edge. Candidate
+indices and counters do not return through CBMRoot between charged
+generations.
+
+Stage 17.3 added the flat execution ABI and device action for
+composite-composite, legacy missing-mass/kaon matching, and unary
+finalization operations. These operations consume resident candidate indices,
+merge bounded physical lineage, and append results to the resident candidate
+pool. The filtered `ReconstructMissingMass()` mode and detector-neutral inputs
+remain explicitly unsupported.
+
+Stage 17.4 transfers descriptor, bounded task/result, and monitoring-counter
+ownership to persistent KFParticle storage. `RunDecayPlan()` queues routing
+and execution for each supported graph generation without a host counter read
+or an intermediate wait. CBMRoot still owns only its normal XPU
+initialization boundary; KFParticle retains its own process-persistent queue
+and every graph allocation.
+
+Step 17 implementation status: complete (100%). The 86-check standalone
+lifecycle covers deterministic repeated execution and graph task overflow.
+Target HIP lifecycle, batch benchmark, and external CBMRoot runtime/diagnostic
+smokes remain the qualification gates; they require no CBMRoot ownership or
+API change.
+
+## Step 18 Integration Boundary
+
+Step 18 is the first step allowed to prepare an alternative public particle
+result, but it does not make GPU reconstruction the default. Its three
+checkpoints preserve the ownership boundary established above:
+
+1. external KFParticle and the existing CBMRoot diagnostic adapter generalize
+   order-independent CPU/GPU comparison to every implemented topology and
+   produce an explicit promotion verdict;
+2. external KFParticle owns bounded conversion from resident candidate pools
+   to complete `KFParticle` objects, including direct composite ancestry;
+   CBMRoot adds only an isolated destination adapter;
+3. CBMRoot adds explicit CPU-only, diagnostic, and validated-GPU modes plus
+   event-atomic fallback and monitoring.
+
+Physical source lineage and direct candidate ancestry are separate contracts.
+Canonical source IDs remain the comparison key. Materialization additionally
+needs immediate parent/daughter references so a cascade or
+composite-composite candidate can be inserted into the public particle vector
+with valid IDs. If current metadata cannot express both, KFParticle extends
+its device sidecar rather than asking CBMRoot to infer ancestry from PDG or
+output order.
+
+The GPU eligibility decision is made before public output mutation. A complete
+event falls back to the existing CPU finder when the requested graph exceeds
+the declared capability manifest, XPU is unavailable, input or field data is
+invalid, any bounded pool overflows, parity validation fails, or
+materialization cannot resolve all references. Partial CPU/GPU result merging
+is outside Step 18.
+
+CPU-only remains the configuration default. Diagnostic dual execution remains
+available after validated GPU routing is added. Synthetic CBMRoot fixtures are
+the required correctness gate for Step 18; representative detector-data
+throughput and promotion to a production default belong to Step 20.
+
+Stage 18.1 keeps this boundary diagnostic-only. KFParticle owns the flat
+parity snapshot and persistent topology/output/operation metadata. The
+CBMRoot adapter downloads event ranges once, builds order-independent
+variable-lineage snapshots, applies channel/output-specific tolerances, and
+records a promotion verdict. It does not materialize or publish GPU particles.
+The runner includes first-generation, cascade, and later graph ranges without
+asking CBMRoot to infer graph identity from PDG or output order.
+
+Stage 18.2 adds `KFParticleGpuMaterializer` on the external side and
+`GpuMaterializationAdapter` as a thin CBMRoot wrapper. The external component
+owns dependency validation, leaf de-duplication, full fit/covariance transfer,
+direct daughter IDs, metadata, and atomic commit. The adapter has no XPU
+ownership and does not alter `GpuDiagnosticRunner` or the normal CPU finder.
+It exists only so isolated CBMRoot tests can exercise the real scalar
+`KFParticle` destination before routing is introduced in Stage 18.3.
 
 ## First CPU/GPU Comparison
 
@@ -312,3 +610,53 @@ The next implementation step can therefore add a small CBMRoot adapter without
 changing GPU ownership or data structures. It should first populate this
 contract and return comparison diagnostics; replacing CPU V0 output is a later
 decision.
+
+## Step 21 Complete Channel Boundary
+
+The complete-input diagnostic route now uses the same dependency-closed plan
+as the Step 21 manifest gate. It contains 252 active channels: 50 two-track,
+124 composite-track, and 78 graph-operation channels. Eight same-sign CPU
+contracts disabled in the source configuration remain explicit in coverage
+but are not emitted as executable nodes.
+
+`AddCompleteCpuFinderChannels()` is the only builder used to claim complete
+CPU-finder coverage. Exhaustive standalone and complete-manifest tests use
+that plan. An ordinary CBMRoot diagnostic batch records the mother PDGs
+requested by its CPU `KfpSelector` and uses
+`AddRequestedCpuFinderChannels()` to build the dependency-closed subset of the
+same catalogue. Capacity accounting and GPU execution therefore cover exactly
+the same physics request; an explicitly supplied narrow plan remains narrow
+and must not be reported as complete. In the complete manifest every active
+channel is uploaded to its routing or graph descriptor table, has a
+corresponding per-channel monitoring slot, uses the common parity snapshot
+identity, and can cross the bounded materialization boundary without
+channel-specific CBMRoot code.
+
+This closes physics scope only. CPU-only remains the default, diagnostic mode
+remains the validated integration route, and the qualification lock from Step
+20 is unchanged. Production promotion requires a later performance and
+real-data requalification of this enlarged complete plan.
+
+Target standalone HIP, serial/batch, CBMRoot unit and smoke, CPU/GPU V0, and
+bounded online/offline diagnostic gates pass for the completed contract.
+Step 21 is accepted at 100%.
+
+## Step 22 Performance Report
+
+Performance monitoring remains opt-in through
+`KFPARTICLE_GPU_PERFORMANCE_MONITORING=1`. Online and offline adapters use the
+same formatter and print the transaction in execution order. Every row names
+its domain (`CPU`, `COPY H2D`, `GPU/QUEUE`, or `COPY D2H`) and wall time. The
+report separates CPU reference, input preparation, capacity planning, queue
+and buffer management, host packing, upload, first-generation construction,
+dependent graph generations, selection, download, extraction, materialization,
+and comparison.
+
+The report also records events, batches, tracks, primary vertices, raw-task
+capacity, monitored-channel work, raw/selected candidates, comparison result,
+kernel launches, queue waits, capacity growth, transfer bytes, memory
+high-water mark, work density, and overflow. `GPU/QUEUE` rows are host wall
+intervals around queue-ordered work; they are not device-event timings for one
+isolated kernel. Existing compact `KFParticle GPU qualification metrics:` and
+`KFParticle GPU performance:` records remain the machine-readable campaign
+contract.

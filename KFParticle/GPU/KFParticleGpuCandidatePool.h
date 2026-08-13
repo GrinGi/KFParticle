@@ -11,6 +11,7 @@
 #ifndef KFPARTICLEGPUCANDIDATEPOOL_H
 #define KFPARTICLEGPUCANDIDATEPOOL_H
 
+#include "KFParticleGpuDecayGraph.h"
 #include "KFParticleGpuSoAView.h"
 
 struct KFParticleGpuCandidateMetadataLayout
@@ -29,8 +30,23 @@ struct KFParticleGpuCandidateMetadataLayout
     DaughterCount,
     Flags,
     ChannelId,
+    Topology,
+    OutputClass,
+    OperationStatus,
+    DirectDaughterCount,
+    DirectFirstKind,
+    DirectFirstIndex,
+    DirectSecondKind,
+    DirectSecondIndex,
     NumberOfUnsignedComponents
   };
+};
+
+enum KFParticleGpuDirectDaughterKind : unsigned int
+{
+  KFGpuDirectDaughterNone = 0u,
+  KFGpuDirectDaughterInputTrack = 1u,
+  KFGpuDirectDaughterCandidate = 2u
 };
 
 template<typename IntegerValue, typename UnsignedValue>
@@ -83,6 +99,38 @@ class KFParticleGpuCandidateMetadataSoAViewBase
   KFPARTICLE_GPU_HOST_DEVICE UnsignedValue& ChannelId(unsigned int candidate) const
   {
     return Unsigned(KFParticleGpuCandidateMetadataLayout::ChannelId, candidate);
+  }
+  KFPARTICLE_GPU_HOST_DEVICE UnsignedValue& OutputClass(unsigned int candidate) const
+  {
+    return Unsigned(KFParticleGpuCandidateMetadataLayout::OutputClass, candidate);
+  }
+  KFPARTICLE_GPU_HOST_DEVICE UnsignedValue& Topology(unsigned int candidate) const
+  {
+    return Unsigned(KFParticleGpuCandidateMetadataLayout::Topology, candidate);
+  }
+  KFPARTICLE_GPU_HOST_DEVICE UnsignedValue& OperationStatus(unsigned int candidate) const
+  {
+    return Unsigned(KFParticleGpuCandidateMetadataLayout::OperationStatus, candidate);
+  }
+  KFPARTICLE_GPU_HOST_DEVICE UnsignedValue& DirectDaughterCount(unsigned int candidate) const
+  {
+    return Unsigned(KFParticleGpuCandidateMetadataLayout::DirectDaughterCount, candidate);
+  }
+  KFPARTICLE_GPU_HOST_DEVICE UnsignedValue& DirectFirstKind(unsigned int candidate) const
+  {
+    return Unsigned(KFParticleGpuCandidateMetadataLayout::DirectFirstKind, candidate);
+  }
+  KFPARTICLE_GPU_HOST_DEVICE UnsignedValue& DirectFirstIndex(unsigned int candidate) const
+  {
+    return Unsigned(KFParticleGpuCandidateMetadataLayout::DirectFirstIndex, candidate);
+  }
+  KFPARTICLE_GPU_HOST_DEVICE UnsignedValue& DirectSecondKind(unsigned int candidate) const
+  {
+    return Unsigned(KFParticleGpuCandidateMetadataLayout::DirectSecondKind, candidate);
+  }
+  KFPARTICLE_GPU_HOST_DEVICE UnsignedValue& DirectSecondIndex(unsigned int candidate) const
+  {
+    return Unsigned(KFParticleGpuCandidateMetadataLayout::DirectSecondIndex, candidate);
   }
 
   KFPARTICLE_GPU_HOST_DEVICE IntegerValue* IntegersData() const { return fIntegers; }
@@ -172,6 +220,14 @@ enum KFParticleGpuCandidateFlags
   KFGpuCandidateSelectionRejected = 1u << 4
 };
 
+/** Persistent, topology-independent outcome attached to every stored candidate. */
+enum KFParticleGpuCandidateOperationStatus : unsigned int
+{
+  KFGpuCandidateOperationPending = 0u,
+  KFGpuCandidateOperationAccepted = 1u,
+  KFGpuCandidateOperationRejected = 2u
+};
+
 /**
  * Non-owning persistent candidate pool descriptor.
  *
@@ -247,6 +303,34 @@ MakeConstView(const KFParticleGpuCandidatePoolView& view)
     view.SizeData(),
     view.OverflowFlagsData(),
     view.Capacity());
+}
+
+KFPARTICLE_GPU_HOST_DEVICE inline void ClearCandidateDirectDaughters(
+  const KFParticleGpuCandidateMetadataSoAView& metadata,
+  unsigned int candidate)
+{
+  metadata.DirectDaughterCount(candidate) = 0u;
+  metadata.DirectFirstKind(candidate) = KFGpuDirectDaughterNone;
+  metadata.DirectFirstIndex(candidate) = 0u;
+  metadata.DirectSecondKind(candidate) = KFGpuDirectDaughterNone;
+  metadata.DirectSecondIndex(candidate) = 0u;
+}
+
+KFPARTICLE_GPU_HOST_DEVICE inline void SetCandidateDirectDaughter(
+  const KFParticleGpuCandidateMetadataSoAView& metadata,
+  unsigned int candidate,
+  unsigned int daughter,
+  unsigned int kind,
+  unsigned int index)
+{
+  if (daughter == 0u) {
+    metadata.DirectFirstKind(candidate) = kind;
+    metadata.DirectFirstIndex(candidate) = index;
+  }
+  else {
+    metadata.DirectSecondKind(candidate) = kind;
+    metadata.DirectSecondIndex(candidate) = index;
+  }
 }
 
 #endif

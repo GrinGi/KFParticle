@@ -203,6 +203,10 @@ public:
     return fParticles;
   } ///< Returns constant reference to the vector with short-lived particle
     ///< candidates.
+  /** Atomically replaces only the event particle result, preserving PV/input state. */
+  void ReplaceParticles(std::vector<KFParticle> particles) {
+    fParticles.swap(particles);
+  }
   /** \brief Logically kills the candidate for short-lived particle with index
    * "iParticle" by setting its PDG hypothesis to "-1". */
   void RemoveParticle(const int iParticle) {

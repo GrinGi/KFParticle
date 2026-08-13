@@ -25,6 +25,8 @@
 #include "KfpGpuDiagnosticComparison.h"
 #include "KfpGpuDiagnosticReport.h"
 #include "KfpGpuDiagnosticRunner.h"
+#include "KfpGpuDiagnosticService.h"
+#include "KfpGpuRouting.h"
 #include "KFPTrackVector.h"
 #include "KFPVertex.h"
 #include "KFParticle.h"
@@ -35,6 +37,7 @@
 
 #include <xpu/host.h>
 
+#include <algorithm>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -50,6 +53,12 @@ namespace
   void LoadLibrary(const char* name)
   {
     Require(gSystem->Load(name) >= 0, name);
+  }
+
+  void FinalizeKfParticleGpu()
+  {
+    // This must happen before ROOT unloads the KFParticle HIP image.
+    cbm::algo::kfp::GpuDiagnosticService::Instance().Finalize();
   }
 
   void SelectCbmXpuDevice(const std::string& device)
@@ -76,22 +85,37 @@ namespace
     }
   }
 
-  void FillTrack(KFPTrackVector& tracks, unsigned int index, int pdg, int charge, int sourceId, float px)
+  void FillTrack(KFPTrackVector& tracks,
+                 unsigned int index,
+                 int pdg,
+                 int charge,
+                 int sourceId,
+                 float px,
+                 float py,
+                 float pz,
+                 float y)
   {
-    tracks.SetParameter(0.f, 0u, index);
-    tracks.SetParameter(0.f, 1u, index);
+    tracks.SetParameter(5.f, 0u, index);
+    tracks.SetParameter(y, 1u, index);
     tracks.SetParameter(0.f, 2u, index);
     tracks.SetParameter(px, 3u, index);
-    tracks.SetParameter(0.1f, 4u, index);
-    tracks.SetParameter(0.2f, 5u, index);
-    for (unsigned int covariance = 0u; covariance < 21u; ++covariance) {
-      tracks.SetCovariance(covariance == 0u || covariance == 2u || covariance == 5u ? 0.01f : 0.f,
-                           covariance,
-                           index);
+    tracks.SetParameter(py, 4u, index);
+    tracks.SetParameter(pz, 5u, index);
+    const float covariance[21] = {
+      0.0100f,  0.0012f, 0.0120f, -0.0008f, 0.0009f, 0.0110f,
+      0.0005f, -0.0004f, 0.0003f,  0.0200f, 0.0006f, -0.0005f,
+      0.0004f,  0.0007f, 0.0180f, -0.0003f, 0.0004f, -0.0002f,
+      0.0008f, -0.0006f, 0.0220f};
+    for (unsigned int component = 0u; component < 21u; ++component) {
+      tracks.SetCovariance(covariance[component], component, index);
     }
 #ifdef NonhomogeneousField
+    const float field[10] = {0.002f, 0.0002f, 0.00001f,
+                             0.100f, 0.0010f, 0.00005f,
+                             -0.001f, 0.0001f, 0.00001f,
+                             0.f};
     for (unsigned int coefficient = 0u; coefficient < 10u; ++coefficient) {
-      tracks.SetFieldCoefficient(0.f, coefficient, index);
+      tracks.SetFieldCoefficient(field[coefficient], coefficient, index);
     }
 #endif
     tracks.SetId(sourceId, index);
@@ -108,18 +132,17 @@ namespace
   {
     first.Resize(2u);
     last.Resize(2u);
-    FillTrack(first, 0u, 211, 1, 101, 0.30f);
-    FillTrack(first, 1u, -211, -1, 102, -0.25f);
-    FillTrack(last, 0u, 211, 1, 101, 0.30f);
-    FillTrack(last, 1u, -211, -1, 102, -0.25f);
-    chiToPrimaryVertex = {10.f, 10.f};
+    FillTrack(first, 0u, 211, 1, 101, 0.32f, 0.10f, 0.05f, 0.f);
+    FillTrack(first, 1u, -211, -1, 102, 0.23f, -0.10f, -0.05f, 0.01f);
+    FillTrack(last, 0u, 211, 1, 101, 0.32f, 0.10f, 0.05f, 0.f);
+    FillTrack(last, 1u, -211, -1, 102, 0.23f, -0.10f, -0.05f, 0.01f);
+    chiToPrimaryVertex = {25.f, 25.f};
 
     KFPVertex source;
     source.SetXYZ(0.f, 0.f, 0.f);
     source.SetCovarianceMatrix(0.01f, 0.f, 0.01f, 0.f, 0.f, 0.01f);
-    source.SetChi2(1.f);
-    source.SetNDF(1);
-    source.SetNContributors(2);
+    source.SetChi2(-100.f);
+    source.SetNContributors(0);
     primaryVertices = {KFVertex(source)};
   }
 }  // namespace
@@ -146,12 +169,26 @@ int cbmroot_gpu_diagnostic_smoke(const char* device = "hip1")
     const auto result = runner.Run(77u, first, last, chiToPrimaryVertex, primaryVertices);
     Require(result.status == cbm::algo::kfp::GpuDiagnosticStatus::Completed,
             "GPU diagnostic runner did not complete");
-    Require(result.taskCapacity == 1u, "default V0 plan did not create the expected pion-pair task");
-    Require(result.candidates == 1u, "GPU diagnostic runner did not build the expected candidate");
-    Require(result.rawCandidates.size() == 1u, "GPU diagnostic runner did not download the raw candidate");
-    Require(result.rawCandidates[0].daughterSourceIds[0] == 101
-              && result.rawCandidates[0].daughterSourceIds[1] == 102,
-            "GPU diagnostic runner did not preserve daughter lineage");
+    // Capacity is an upper bound before pair/fit rejection. The complete
+    // default plan may add raw-track graph hypotheses as channel coverage
+    // grows, so this integration smoke checks the required V0 subset instead
+    // of freezing the total capacity of the evolving catalogue.
+    Require(result.taskCapacity >= 3u,
+            "complete default plan did not create the required V0 hypotheses");
+    Require(result.candidates > 0u && result.candidates <= result.taskCapacity,
+            "GPU diagnostic runner returned an invalid candidate count");
+    Require(result.rawCandidates.size() == result.candidates,
+            "GPU diagnostic runner candidate counter and downloaded output disagree");
+    const auto k0 = std::find_if(result.rawCandidates.begin(), result.rawCandidates.end(), [](const auto& candidate) {
+      return candidate.channelId == KFGpuChannelK0ShortToPiPlusPiMinus;
+    });
+    Require(k0 != result.rawCandidates.end(), "GPU diagnostic runner did not preserve K0S channel identity");
+    Require(k0->daughterSourceIds[0] == 101 && k0->daughterSourceIds[1] == 102,
+            "GPU diagnostic runner did not preserve K0S daughter lineage");
+    Require(result.materializationSucceeded
+              && result.materializationStatus == KFGpuMaterializationSucceeded
+              && result.materializedParticles.size() == 2u + result.candidates,
+            "GPU runner did not atomically materialize the tracks and constructed V0 candidates");
     Require(result.inputUploadMilliseconds >= 0. && result.constructionMilliseconds >= 0.
               && result.selectionMilliseconds >= 0. && result.outputDownloadMilliseconds >= 0.,
             "GPU diagnostic runner returned invalid phase timing");
@@ -166,8 +203,34 @@ int cbmroot_gpu_diagnostic_smoke(const char* device = "hip1")
       unresolvedCpuCandidates);
     cbm::algo::kfp::GpuDiagnosticReporter::Instance().Record(result, comparison);
     const auto report = cbm::algo::kfp::GpuDiagnosticReporter::Instance().TakeReport();
-    Require(report.completed == 1u && report.gpuOnly == 1u && report.channels.size() == 3u,
+    Require(report.completed == 1u && report.gpuOnly == result.candidates && report.channels.size() == 50u,
             "GPU diagnostic reporter did not retain default-channel accounting");
+
+    cbm::algo::kfp::GpuRoutingInput routing;
+    routing.mode = cbm::algo::kfp::GpuExecutionMode::QualifiedGpu;
+    routing.sampled = true;
+    routing.capabilitySupported = cbm::algo::kfp::GpuCapabilityManifest::QualifiedV0().Supports(
+      {310, 3122, -3122});
+    const auto locked = cbm::algo::kfp::GpuRouter::Decide(routing);
+    Require(!locked.publishGpu
+              && locked.reason == cbm::algo::kfp::GpuRoutingReason::QualificationLocked,
+            "unqualified V0 route was not locked before accelerator attachment");
+    routing.qualificationUnlocked = true;
+    routing.referenceComparisonRequired = false;
+    routing.executionStatus = result.status;
+    routing.overflowFlags = result.overflowFlags;
+    routing.promotion.blockers = KFGpuPromotionReady;
+    routing.materializationSucceeded = result.materializationSucceeded;
+    routing.materializationStatus = result.materializationStatus;
+    const auto accepted = cbm::algo::kfp::GpuRouter::Decide(routing);
+    Require(accepted.publishGpu
+              && accepted.reason == cbm::algo::kfp::GpuRoutingReason::GpuAccepted,
+            "qualified V0 event was not accepted by the routing policy");
+    routing.executionStatus = cbm::algo::kfp::GpuDiagnosticStatus::FieldRejected;
+    const auto fallback = cbm::algo::kfp::GpuRouter::Decide(routing);
+    Require(!fallback.publishGpu
+              && fallback.reason == cbm::algo::kfp::GpuRoutingReason::InvalidField,
+            "invalid field did not produce an event-atomic CPU fallback");
 
     const std::vector<float> invalidChi;
     const auto invalid = runner.Run(78u, first, last, invalidChi, primaryVertices);
@@ -177,18 +240,25 @@ int cbmroot_gpu_diagnostic_smoke(const char* device = "hip1")
     // ROOT unloads interpreted code during process teardown. Release the
     // KFParticle-owned queue and buffers while its HIP image is still loaded;
     // CBMRoot continues to own the process-wide XPU runtime.
+    FinalizeKfParticleGpu();
     KFParticleGpuRuntime& runtime = KFParticleGpuRuntime::Instance();
-    runtime.Finalize();
     Require(!runtime.IsInitialized(), "KFParticle GPU runtime did not finalize");
     Require(cbm::Xpu::Instance().IsInitialized(), "KFParticle finalized CBMRoot XPU");
 
     std::cout << "PASS cbmroot-kfp-gpu-diagnostic - CBMRoot XPU, the KFParticle diagnostic adapter, "
-                 "default V0 GPU plan, lineage, telemetry, reporting, and invalid-input isolation work together"
+                 "default V0 GPU plan, materialization, qualified routing, event-atomic fallback, monitoring, "
+                 "reporting, and invalid-input isolation work together"
               << std::endl;
     return 0;
   }
   catch (const std::exception& error) {
     std::cerr << "FAIL cbmroot-kfp-gpu-diagnostic - " << error.what() << std::endl;
+    try {
+      FinalizeKfParticleGpu();
+    }
+    catch (const std::exception& cleanupError) {
+      std::cerr << "FAIL cbmroot-kfp-gpu-diagnostic cleanup - " << cleanupError.what() << std::endl;
+    }
     return 1;
   }
 }

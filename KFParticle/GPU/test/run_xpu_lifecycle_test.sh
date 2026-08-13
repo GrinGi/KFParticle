@@ -2,6 +2,17 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+test_source="${script_dir}/KFParticleGpuXpuLifecycleTest.cxx"
+kernel_source="${script_dir}/../KFParticleGpuKernels.cxx"
+two_daughter_source="${script_dir}/../KFParticleGpuTwoDaughter.h"
+math_source="${script_dir}/../KFParticleGpuMath.h"
+routing_header="${script_dir}/../KFParticleGpuChannelRouting.h"
+routing_source="${script_dir}/../KFParticleGpuRoutingPlan.cxx"
+graph_header="${script_dir}/../KFParticleGpuDecayGraph.h"
+graph_source="${script_dir}/../KFParticleGpuDecayGraphPlan.cxx"
+catalogue_header="${script_dir}/../KFParticleGpuCpuChannelCatalogue.h"
+catalogue_source="${script_dir}/../KFParticleGpuCpuChannelCatalogue.cxx"
+graph_operations="${script_dir}/../KFParticleGpuGraphOperations.h"
 source_dir="${script_dir}/xpu"
 repository_dir="$(cd "${script_dir}/../../.." && pwd)"
 cbmroot_dir="$(cd "${repository_dir}/../.." && pwd)"
@@ -17,6 +28,50 @@ diagnostics="${KFPARTICLE_GPU_TEST_DIAGNOSTICS:-0}"
 quiet_build="${KFPARTICLE_GPU_TEST_QUIET_BUILD:-1}"
 run_batch_benchmark="${KFPARTICLE_GPU_RUN_BATCH_BENCHMARK:-0}"
 log_dir="${build_dir}/logs"
+
+if command -v sha256sum >/dev/null 2>&1; then
+  test_source_id="$(sha256sum "${test_source}" | awk '{print substr($1, 1, 12)}')"
+  kernel_source_id="$(sha256sum "${kernel_source}" | awk '{print substr($1, 1, 12)}')"
+  two_daughter_source_id="$(sha256sum "${two_daughter_source}" | awk '{print substr($1, 1, 12)}')"
+  math_source_id="$(sha256sum "${math_source}" | awk '{print substr($1, 1, 12)}')"
+  routing_header_id="$(sha256sum "${routing_header}" | awk '{print substr($1, 1, 12)}')"
+  routing_source_id="$(sha256sum "${routing_source}" | awk '{print substr($1, 1, 12)}')"
+  graph_header_id="$(sha256sum "${graph_header}" | awk '{print substr($1, 1, 12)}')"
+  graph_source_id="$(sha256sum "${graph_source}" | awk '{print substr($1, 1, 12)}')"
+  catalogue_header_id="$(sha256sum "${catalogue_header}" | awk '{print substr($1, 1, 12)}')"
+  catalogue_source_id="$(sha256sum "${catalogue_source}" | awk '{print substr($1, 1, 12)}')"
+  graph_operations_id="$(sha256sum "${graph_operations}" | awk '{print substr($1, 1, 12)}')"
+elif command -v shasum >/dev/null 2>&1; then
+  test_source_id="$(shasum -a 256 "${test_source}" | awk '{print substr($1, 1, 12)}')"
+  kernel_source_id="$(shasum -a 256 "${kernel_source}" | awk '{print substr($1, 1, 12)}')"
+  two_daughter_source_id="$(shasum -a 256 "${two_daughter_source}" | awk '{print substr($1, 1, 12)}')"
+  math_source_id="$(shasum -a 256 "${math_source}" | awk '{print substr($1, 1, 12)}')"
+  routing_header_id="$(shasum -a 256 "${routing_header}" | awk '{print substr($1, 1, 12)}')"
+  routing_source_id="$(shasum -a 256 "${routing_source}" | awk '{print substr($1, 1, 12)}')"
+  graph_header_id="$(shasum -a 256 "${graph_header}" | awk '{print substr($1, 1, 12)}')"
+  graph_source_id="$(shasum -a 256 "${graph_source}" | awk '{print substr($1, 1, 12)}')"
+  catalogue_header_id="$(shasum -a 256 "${catalogue_header}" | awk '{print substr($1, 1, 12)}')"
+  catalogue_source_id="$(shasum -a 256 "${catalogue_source}" | awk '{print substr($1, 1, 12)}')"
+  graph_operations_id="$(shasum -a 256 "${graph_operations}" | awk '{print substr($1, 1, 12)}')"
+else
+  test_source_id="unavailable"
+  kernel_source_id="unavailable"
+  two_daughter_source_id="unavailable"
+  math_source_id="unavailable"
+  routing_header_id="unavailable"
+  routing_source_id="unavailable"
+  graph_header_id="unavailable"
+  graph_source_id="unavailable"
+  catalogue_header_id="unavailable"
+  catalogue_source_id="unavailable"
+  graph_operations_id="unavailable"
+fi
+
+# CMake's timestamp dependency checks are insufficient when source files are
+# copied from another filesystem with preserved or older mtimes. Carry the
+# content identity into the compiler command so changed sources necessarily
+# rebuild both the host support library and its test executables.
+source_fingerprint="${test_source_id}-${kernel_source_id}-${two_daughter_source_id}-${math_source_id}-${routing_header_id}-${routing_source_id}-${graph_header_id}-${graph_source_id}-${catalogue_header_id}-${catalogue_source_id}-${graph_operations_id}"
 
 mkdir -p "${log_dir}"
 
@@ -95,6 +150,17 @@ echo "  xpu dir    : ${xpu_source_dir}"
 echo "  device     : ${device}"
 echo "  env mode   : ${env_mode}"
 echo "  logs       : ${log_dir}"
+echo "  lifecycle source id : ${test_source_id}"
+echo "  kernel source id    : ${kernel_source_id}"
+echo "  two-daughter id     : ${two_daughter_source_id}"
+echo "  math source id      : ${math_source_id}"
+echo "  routing header id   : ${routing_header_id}"
+echo "  routing source id   : ${routing_source_id}"
+echo "  graph header id     : ${graph_header_id}"
+echo "  graph source id     : ${graph_source_id}"
+echo "  catalogue header id : ${catalogue_header_id}"
+echo "  catalogue source id : ${catalogue_source_id}"
+echo "  graph operations id : ${graph_operations_id}"
 
 backend_args=()
 cmake_args=(
@@ -103,7 +169,7 @@ cmake_args=(
   "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE:-Debug}"
   "-DKFPARTICLE_GPU_TEST_DEVICE=${device}"
   "-DKFPARTICLE_GPU_TEST_ENV_MODE=${env_mode}"
-  "-DKFPARTICLE_GPU_TEST_TRACE=${KFPARTICLE_GPU_TEST_TRACE:-OFF}"
+  "-DKFPARTICLE_GPU_SOURCE_FINGERPRINT=${source_fingerprint}"
   "-DXPU_SOURCE_DIR=${xpu_source_dir}"
 )
 

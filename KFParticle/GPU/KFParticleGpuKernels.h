@@ -13,9 +13,11 @@
 
 #include "KFParticleGpuCandidatePool.h"
 #include "KFParticleGpuDeviceImage.h"
+#include "KFParticleGpuGraphOperations.h"
 #include "KFParticleGpuInputData.h"
 #include "KFParticleGpuKernelState.h"
 #include "KFParticleGpuTwoDaughter.h"
+#include "KFParticleGpuV0Track.h"
 
 #ifdef KFPARTICLE_GPU_XPU_ENABLED
 
@@ -48,8 +50,7 @@ struct KFParticleGpuLaunchSmoke : xpu::kernel<KFParticleGpuDeviceImage>
   XPU_D void operator()(context& context, unsigned int* marker);
 };
 
-// Diagnostic-only constant-memory check. Production kernels keep their
-// explicit-view ABI until this path is validated on every enabled backend.
+// Diagnostic-only constant-memory check covering every published state view.
 struct KFParticleGpuKernelStateProbe : xpu::kernel<KFParticleGpuDeviceImage>
 {
   using block_size = xpu::block_size<64>;
@@ -75,17 +76,301 @@ struct KFParticleGpuInputLayoutProbe : xpu::kernel<KFParticleGpuDeviceImage>
                         unsigned int* unsignedChecks);
 };
 
-struct KFParticleGpuRoundTripArgs : xpu::kernel<KFParticleGpuDeviceImage>
+// A one-thread ABI probe; cascade reconstruction itself starts only in Step 14.2.
+struct KFParticleGpuV0TrackTaskProbe : xpu::kernel<KFParticleGpuDeviceImage>
 {
   using block_size = xpu::block_size<64>;
   using shared_memory = xpu::no_smem;
   using context = xpu::kernel_context<shared_memory>;
 
   XPU_D void operator()(context& context,
-                        KFParticleGpuConstInputTrackSoAView inputTracks,
-                        KFParticleGpuCandidatePoolView candidates,
-                        float mass,
-                        unsigned int eventIndex);
+                        KFParticleGpuConstCandidatePoolView candidates,
+                        KFParticleGpuConstSelectedCandidateIndexView selected,
+                        KFParticleGpuConstInputTrackSoAView tracks,
+                        KFParticleGpuV0TrackChannel channel,
+                        KFParticleGpuSelectedCandidateRange selectedRange,
+                        unsigned int selectedV0Index,
+                        unsigned int bachelorTrackIndex,
+                        unsigned int* rejection,
+                        KFParticleGpuV0TrackTask* task,
+                        KFParticleGpuV0TrackLineage* lineage);
+};
+
+struct KFParticleGpuGenerateV0TrackTasksCompact : xpu::kernel<KFParticleGpuDeviceImage>
+{
+  using block_size = xpu::block_size<64>;
+  using shared_memory = xpu::no_smem;
+  using context = xpu::kernel_context<shared_memory>;
+
+  XPU_D void operator()(context& context,
+                        KFParticleGpuConstCandidatePoolView candidates,
+                        KFParticleGpuConstSelectedCandidateIndexView selected,
+                        KFParticleGpuConstInputTrackSoAView tracks,
+                        KFParticleGpuV0TrackChannel channel,
+                        KFParticleGpuSelectedCandidateRange selectedRange,
+                        KFParticleGpuV0TrackTask* tasks,
+                        unsigned int taskCapacity,
+                        unsigned int* acceptedTasks,
+                        unsigned int* totalPairs,
+                        unsigned int* overflowFlags);
+};
+
+struct KFParticleGpuV0TrackCompactCandidatePoolKernel : xpu::kernel<KFParticleGpuDeviceImage>
+{
+  using block_size = xpu::block_size<64>;
+  using shared_memory = xpu::no_smem;
+  using context = xpu::kernel_context<shared_memory>;
+
+  XPU_D void operator()(context& context,
+                        KFParticleGpuConstInputTrackSoAView tracks,
+                        KFParticleGpuConstCandidatePoolView inputCandidates,
+                        const KFParticleGpuV0TrackTask* tasks,
+                        unsigned int taskCapacity,
+                        const unsigned int* acceptedTasks,
+                        KFParticleGpuCandidatePoolView outputCandidates);
+};
+
+/**
+ * One thread visits one selected-V0/bachelor pair and emits all compatible
+ * descriptor bits into a single bounded worklist.
+ */
+struct KFParticleGpuRouteV0TrackTasksAtomic : xpu::kernel<KFParticleGpuDeviceImage>
+{
+  using block_size = xpu::block_size<64>;
+  using shared_memory = xpu::no_smem;
+  using context = xpu::kernel_context<shared_memory>;
+
+  XPU_D void operator()(context& context,
+                        KFParticleGpuConstCandidatePoolView candidates,
+                        KFParticleGpuConstSelectedCandidateIndexView selected,
+                        KFParticleGpuConstInputTrackSoAView tracks,
+                        const KFParticleGpuEventDesc* events,
+                        KFParticleGpuV0TrackRoutingView routing,
+                        unsigned int eventIndex,
+                        unsigned int groupIndex,
+                        KFParticleGpuSelectedCandidateRange selectedRange,
+                        KFParticleGpuV0TrackRoutedTask* tasks,
+                        unsigned int taskCapacity,
+                        unsigned int* visitedPairs,
+                        unsigned int* activeChannelBits,
+                        unsigned int* acceptedTasks,
+                        unsigned int* storedTasks,
+                        unsigned int* blockReservations,
+                        unsigned int* overflowFlags);
+};
+
+/** Block-scan compaction reserves one global routed-task range per block. */
+struct KFParticleGpuRouteV0TrackTasksBlockScan : xpu::kernel<KFParticleGpuDeviceImage>
+{
+  static constexpr int ScanBlockSize = 64;
+  using block_size = xpu::block_size<ScanBlockSize>;
+  using scan_t = xpu::block_scan<unsigned int, ScanBlockSize>;
+  struct shared_data
+  {
+    scan_t::storage_t scan;
+    unsigned int blockBase;
+    unsigned int blockTotal;
+  };
+  using constants = xpu::cmem<TheKFParticleFinder>;
+  using shared_memory = shared_data;
+  using context = xpu::kernel_context<shared_memory, constants>;
+
+  XPU_D void operator()(context& context,
+                        unsigned int eventIndex,
+                        unsigned int groupIndex,
+                        KFParticleGpuSelectedCandidateRange selectedRange,
+                        unsigned int taskLimit);
+};
+
+/** Descriptor-driven construction consumes the routed pool without a host wait. */
+struct KFParticleGpuV0TrackRoutedCandidatePoolKernel : xpu::kernel<KFParticleGpuDeviceImage>
+{
+  using block_size = xpu::block_size<64>;
+  using constants = xpu::cmem<TheKFParticleFinder>;
+  using shared_memory = xpu::no_smem;
+  using context = xpu::kernel_context<shared_memory, constants>;
+
+  XPU_D void operator()(context& context, unsigned int taskLimit);
+};
+
+/** Resets reusable composite-track routing state entirely on device. */
+struct KFParticleGpuResetV0TrackGenerationState
+  : xpu::kernel<KFParticleGpuDeviceImage>
+{
+  using block_size = xpu::block_size<64>;
+  using constants = xpu::cmem<TheKFParticleFinder>;
+  using shared_memory = xpu::no_smem;
+  using context = xpu::kernel_context<shared_memory, constants>;
+
+  XPU_D void operator()(context& context, unsigned int resetChannelCounters);
+};
+
+/** Explicit-view graph execution oracle retained for isolated device tests. */
+struct KFParticleGpuExecuteGraphOperationsExplicit
+  : xpu::kernel<KFParticleGpuDeviceImage>
+{
+  using block_size = xpu::block_size<64>;
+  using shared_memory = xpu::no_smem;
+  using context = xpu::kernel_context<shared_memory>;
+
+  XPU_D void operator()(
+    context& context,
+    KFParticleGpuConstInputTrackSoAView inputTracks,
+    KFParticleGpuConstCandidatePoolView inputCandidates,
+    KFParticleGpuConstVertexSoAView primaryVertices,
+    const KFParticleGpuGraphOperationDescriptor* descriptors,
+    unsigned int descriptorCount,
+    const KFParticleGpuGraphOperationTask* tasks,
+    unsigned int taskCount,
+    KFParticleGpuCandidatePoolView outputCandidates,
+    KFParticleGpuGraphOperationResult* results);
+};
+
+/** Resets reusable later-generation scheduler counters entirely on device. */
+struct KFParticleGpuResetGraphOperationGeneration
+  : xpu::kernel<KFParticleGpuDeviceImage>
+{
+  using block_size = xpu::block_size<64>;
+  using constants = xpu::cmem<TheKFParticleFinder>;
+  using shared_memory = xpu::no_smem;
+  using context = xpu::kernel_context<shared_memory, constants>;
+
+  XPU_D void operator()(context& context);
+};
+
+/** Routes one graph execution group from resident candidate metadata. */
+struct KFParticleGpuRouteGraphOperationTasks
+  : xpu::kernel<KFParticleGpuDeviceImage>
+{
+  using block_size = xpu::block_size<64>;
+  using constants = xpu::cmem<TheKFParticleFinder>;
+  using shared_memory = xpu::no_smem;
+  using context = xpu::kernel_context<shared_memory, constants>;
+
+  XPU_D void operator()(
+    context& context,
+    unsigned int eventIndex,
+    unsigned int groupIndex,
+    unsigned int sourceCapacity,
+    unsigned int taskLimit);
+};
+
+/** Executes the device-generated task count without a host readback. */
+struct KFParticleGpuExecuteRoutedGraphOperations
+  : xpu::kernel<KFParticleGpuDeviceImage>
+{
+  using block_size = xpu::block_size<64>;
+  using constants = xpu::cmem<TheKFParticleFinder>;
+  using shared_memory = xpu::no_smem;
+  using context = xpu::kernel_context<shared_memory, constants>;
+
+  XPU_D void operator()(context& context, unsigned int taskLimit);
+};
+
+/** One thread visits one event-local track pair and emits every active channel bit. */
+struct KFParticleGpuRouteTwoDaughterTasksAtomic : xpu::kernel<KFParticleGpuDeviceImage>
+{
+  using block_size = xpu::block_size<64>;
+  using shared_memory = xpu::no_smem;
+  using context = xpu::kernel_context<shared_memory>;
+
+  XPU_D void operator()(context& context,
+                        KFParticleGpuConstInputTrackSoAView tracks,
+                        const KFParticleGpuEventDesc* events,
+                        KFParticleGpuTwoDaughterRoutingView routing,
+                        unsigned int eventIndex,
+                        unsigned int groupIndex,
+                        KFParticleGpuTwoDaughterRoutedTask* tasks,
+                        unsigned int taskCapacity,
+                        unsigned int* visitedPairs,
+                        unsigned int* activeChannelBits,
+                        unsigned int* acceptedTasks,
+                        unsigned int* storedTasks,
+                        unsigned int* blockReservations,
+                        unsigned int* overflowFlags);
+};
+
+/** Block-scan compaction performs one bounded global task reservation per block. */
+struct KFParticleGpuRouteTwoDaughterTasksBlockScan
+  : xpu::kernel<KFParticleGpuDeviceImage>
+{
+  static constexpr int ScanBlockSize = 64;
+  using block_size = xpu::block_size<ScanBlockSize>;
+  using scan_t = xpu::block_scan<unsigned int, ScanBlockSize>;
+  struct shared_data
+  {
+    scan_t::storage_t scan;
+    unsigned int blockBase;
+    unsigned int blockTotal;
+  };
+  using constants = xpu::cmem<TheKFParticleFinder>;
+  using shared_memory = shared_data;
+  using context = xpu::kernel_context<shared_memory, constants>;
+
+  XPU_D void operator()(context& context,
+                        unsigned int eventIndex,
+                        unsigned int groupIndex,
+                        unsigned int taskLimit);
+};
+
+/** Descriptor-driven construction consumes routed tasks directly on the same queue. */
+struct KFParticleGpuTwoDaughterRoutedCandidatePoolKernel
+  : xpu::kernel<KFParticleGpuDeviceImage>
+{
+  using block_size = xpu::block_size<64>;
+  using constants = xpu::cmem<TheKFParticleFinder>;
+  using shared_memory = xpu::no_smem;
+  using context = xpu::kernel_context<shared_memory, constants>;
+
+  XPU_D void operator()(context& context, unsigned int taskLimit);
+};
+
+/** Resets one event's routing and selection counters without a host round-trip. */
+struct KFParticleGpuResetTwoDaughterGenerationState
+  : xpu::kernel<KFParticleGpuDeviceImage>
+{
+  using block_size = xpu::block_size<64>;
+  using constants = xpu::cmem<TheKFParticleFinder>;
+  using shared_memory = xpu::no_smem;
+  using context = xpu::kernel_context<shared_memory, constants>;
+
+  XPU_D void operator()(context& context);
+};
+
+/** Evaluates every raw candidate using its O(1) routing descriptor tag. */
+struct KFParticleGpuEvaluateTwoDaughterGenerationSelection
+  : xpu::kernel<KFParticleGpuDeviceImage>
+{
+  using block_size = xpu::block_size<64>;
+  using constants = xpu::cmem<TheKFParticleFinder>;
+  using shared_memory = xpu::no_smem;
+  using context = xpu::kernel_context<shared_memory, constants>;
+
+  XPU_D void operator()(context& context, unsigned int eventIndex);
+};
+
+/** One device thread assigns bounded contiguous selected-output channel segments. */
+struct KFParticleGpuPrepareTwoDaughterSelectionSegments
+  : xpu::kernel<KFParticleGpuDeviceImage>
+{
+  using block_size = xpu::block_size<64>;
+  using constants = xpu::cmem<TheKFParticleFinder>;
+  using shared_memory = xpu::no_smem;
+  using context = xpu::kernel_context<shared_memory, constants>;
+
+  XPU_D void operator()(context& context);
+};
+
+/** Scatters selected raw indices into the descriptor segments prepared above. */
+struct KFParticleGpuScatterTwoDaughterGenerationSelection
+  : xpu::kernel<KFParticleGpuDeviceImage>
+{
+  using block_size = xpu::block_size<64>;
+  using constants = xpu::cmem<TheKFParticleFinder>;
+  using shared_memory = xpu::no_smem;
+  using context = xpu::kernel_context<shared_memory, constants>;
+
+  XPU_D void operator()(context& context, unsigned int eventIndex);
 };
 
 struct KFParticleGpuTwoDaughterTaskKernel : xpu::kernel<KFParticleGpuDeviceImage>
@@ -197,6 +482,128 @@ struct KFParticleGpuFieldTransportProbe : xpu::kernel<KFParticleGpuDeviceImage>
   XPU_D void operator()(context& context, float* floatChecks, int* integerChecks);
 };
 
+// Test-only device call for the Stage 13.1 topology contract. It keeps the
+// new helper independently backend-qualified before selection consumes it.
+struct KFParticleGpuV0LineTopologyProbe : xpu::kernel<KFParticleGpuDeviceImage>
+{
+  using block_size = xpu::block_size<64>;
+  using shared_memory = xpu::no_smem;
+  using context = xpu::kernel_context<shared_memory>;
+
+  XPU_D void operator()(context& context, float* floatChecks, unsigned int* statusChecks);
+};
+
+// Test-only stage probe for the coupled full-field two-daughter path. It uses
+// the production helpers, but returns compact POD diagnostics instead of
+// printing from the device, so host/device divergence stays reproducible.
+struct KFParticleGpuFullFieldTwoDaughterTrace
+{
+  float by;
+  float firstRoots[2];
+  float secondRoots[2];
+  float dS[2];
+  float dsdr[4][6];
+  KFParticleGpuMath::KFParticleGpuDcaArithmeticTrace dcaArithmetic;
+  KFParticleGpuFitState preliminaryFirst;
+  KFParticleGpuFitState preliminarySecond;
+  KFParticleGpuFitState secondPassCurrent;
+  KFParticleGpuMeasurement secondPassMeasurement;
+  KFParticleGpuFitState fittedMother;
+  unsigned int useMiddlePoint;
+  unsigned int stage;
+};
+
+struct KFParticleGpuFullFieldTwoDaughterProbe : xpu::kernel<KFParticleGpuDeviceImage>
+{
+  using block_size = xpu::block_size<64>;
+  using shared_memory = xpu::no_smem;
+  using context = xpu::kernel_context<shared_memory>;
+
+  XPU_D void operator()(context& context,
+                        KFParticleGpuConstInputTrackSoAView inputTracks,
+                        const KFParticleGpuTwoDaughterTask* tasks,
+                        KFParticleGpuFullFieldTwoDaughterTrace* trace);
+};
+
+// Test-only snapshot of the exact constant-memory state consumed by the
+// routed candidate executor. It distinguishes task/descriptor corruption
+// from construction and candidate-pool publication failures.
+struct KFParticleGpuRoutedTwoDaughterTrace
+{
+  KFParticleGpuTwoDaughterRoutedTask routed;
+  KFParticleGpuTwoDaughterRoutingDescriptor descriptor;
+  KFParticleGpuTwoDaughterTask task;
+  KFParticleGpuFitState mother;
+  unsigned int status = 0u;
+  unsigned int storedTasks = 0u;
+  unsigned int taskCapacity = 0u;
+  unsigned int descriptorCount = 0u;
+  unsigned int candidateSize = 0u;
+  unsigned int candidateCapacity = 0u;
+  unsigned int daughterSize = 0u;
+  unsigned int daughterCapacity = 0u;
+};
+
+struct KFParticleGpuRoutedTwoDaughterProbe : xpu::kernel<KFParticleGpuDeviceImage>
+{
+  using block_size = xpu::block_size<64>;
+  using constants = xpu::cmem<TheKFParticleFinder>;
+  using shared_memory = xpu::no_smem;
+  using context = xpu::kernel_context<shared_memory, constants>;
+
+  XPU_D void operator()(context& context,
+                        unsigned int taskLimit,
+                        KFParticleGpuRoutedTwoDaughterTrace* trace,
+                        unsigned int traceCapacity);
+};
+
+// Reads a stored candidate through the same SoA view used by reconstruction.
+// Together with the full-field probe it separates construction from store and
+// device-to-host transfer without relying on device-side printf.
+struct KFParticleGpuCandidatePoolReadbackProbe : xpu::kernel<KFParticleGpuDeviceImage>
+{
+  using block_size = xpu::block_size<64>;
+  using shared_memory = xpu::no_smem;
+  using context = xpu::kernel_context<shared_memory>;
+
+  XPU_D void operator()(context& context,
+                        KFParticleGpuConstCandidatePoolView candidates,
+                        float* floatChecks,
+                        int* integerChecks);
+};
+
+// Captures the result of the production two-daughter builder before it reaches
+// StoreCandidateFit. This distinguishes a builder stack/codegen issue from a
+// candidate-SoA store issue in a single device launch.
+struct KFParticleGpuTwoDaughterBuildProbe : xpu::kernel<KFParticleGpuDeviceImage>
+{
+  using block_size = xpu::block_size<64>;
+  using shared_memory = xpu::no_smem;
+  using context = xpu::kernel_context<shared_memory>;
+
+  XPU_D void operator()(context& context,
+                        KFParticleGpuConstInputTrackSoAView inputTracks,
+                        const KFParticleGpuTwoDaughterTask* tasks,
+                        float* floatChecks,
+                        int* integerChecks);
+};
+
+// Uses the exact production task-kernel argument layout and writes an
+// unmistakable candidate SoA sentinel. This checks XPU/HIP aggregate argument
+// ABI independently of reconstruction math and candidate construction.
+struct KFParticleGpuTwoDaughterArgumentProbe : xpu::kernel<KFParticleGpuDeviceImage>
+{
+  using block_size = xpu::block_size<64>;
+  using shared_memory = xpu::no_smem;
+  using context = xpu::kernel_context<shared_memory>;
+
+  XPU_D void operator()(context& context,
+                        KFParticleGpuConstInputTrackSoAView inputTracks,
+                        const KFParticleGpuTwoDaughterTask* tasks,
+                        unsigned int numberOfTasks,
+                        KFParticleGpuCandidatePoolView candidates);
+};
+
 /**
  * Device-side KFParticle reconstruction methods.
  *
@@ -224,7 +631,21 @@ class KFParticleGpuKernels : public KFParticleGpuKernelState
     unsigned int twoDaughterTaskCapacity,
     const KFParticleGpuCandidatePoolView& candidates,
     const KFParticleGpuV0SelectionResultView& selectionResults,
-    const KFParticleGpuSelectedCandidateIndexView& selectedCandidates)
+    const KFParticleGpuSelectedCandidateIndexView& selectedCandidates,
+    const KFParticleGpuV0TrackRoutingView& v0TrackRouting =
+      KFParticleGpuV0TrackRoutingView(),
+    const KFParticleGpuTwoDaughterRoutingView& twoDaughterRouting =
+      KFParticleGpuTwoDaughterRoutingView(),
+    const KFParticleGpuCandidateDescriptorIndexView& candidateDescriptorIndices =
+      KFParticleGpuCandidateDescriptorIndexView(),
+    const KFParticleGpuDecayGraphView& decayGraph =
+      KFParticleGpuDecayGraphView(),
+    const KFParticleGpuGraphOperationStorageView& graphOperations =
+      KFParticleGpuGraphOperationStorageView(),
+    const KFParticleGpuTwoDaughterGenerationStorageView& twoDaughterGeneration =
+      KFParticleGpuTwoDaughterGenerationStorageView(),
+    const KFParticleGpuV0TrackGenerationStorageView& v0TrackGeneration =
+      KFParticleGpuV0TrackGenerationStorageView())
     : KFParticleGpuKernelState(inputTracks,
                                primaryVertices,
                                events,
@@ -232,7 +653,14 @@ class KFParticleGpuKernels : public KFParticleGpuKernelState
                                twoDaughterTaskCapacity,
                                candidates,
                                selectionResults,
-                               selectedCandidates)
+                               selectedCandidates,
+                               v0TrackRouting,
+                               twoDaughterRouting,
+                               candidateDescriptorIndices,
+                               decayGraph,
+                               graphOperations,
+                               twoDaughterGeneration,
+                               v0TrackGeneration)
   {
   }
 
@@ -245,7 +673,21 @@ class KFParticleGpuKernels : public KFParticleGpuKernelState
     const KFParticleGpuTwoDaughterTask* twoDaughterTasks,
     unsigned int twoDaughterTaskCapacity,
     const KFParticleGpuCandidatePoolView& candidates,
-    const KFParticleGpuSelectedCandidateIndexView& selectedCandidates)
+    const KFParticleGpuSelectedCandidateIndexView& selectedCandidates,
+    const KFParticleGpuV0TrackRoutingView& v0TrackRouting =
+      KFParticleGpuV0TrackRoutingView(),
+    const KFParticleGpuTwoDaughterRoutingView& twoDaughterRouting =
+      KFParticleGpuTwoDaughterRoutingView(),
+    const KFParticleGpuCandidateDescriptorIndexView& candidateDescriptorIndices =
+      KFParticleGpuCandidateDescriptorIndexView(),
+    const KFParticleGpuDecayGraphView& decayGraph =
+      KFParticleGpuDecayGraphView(),
+    const KFParticleGpuGraphOperationStorageView& graphOperations =
+      KFParticleGpuGraphOperationStorageView(),
+    const KFParticleGpuTwoDaughterGenerationStorageView& twoDaughterGeneration =
+      KFParticleGpuTwoDaughterGenerationStorageView(),
+    const KFParticleGpuV0TrackGenerationStorageView& v0TrackGeneration =
+      KFParticleGpuV0TrackGenerationStorageView())
     : KFParticleGpuKernels(inputTracks,
                            primaryVertices,
                            events,
@@ -253,7 +695,14 @@ class KFParticleGpuKernels : public KFParticleGpuKernelState
                            twoDaughterTaskCapacity,
                            candidates,
                            KFParticleGpuV0SelectionResultView(nullptr, 0u),
-                           selectedCandidates)
+                           selectedCandidates,
+                           v0TrackRouting,
+                           twoDaughterRouting,
+                           candidateDescriptorIndices,
+                           decayGraph,
+                           graphOperations,
+                           twoDaughterGeneration,
+                           v0TrackGeneration)
   {
   }
 

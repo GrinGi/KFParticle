@@ -137,17 +137,6 @@ set (SOURCES
   KFParticleTest/KFParticleTest.cxx
 )
 
-if(KFPARTICLE_USE_XPU)
-  list(APPEND SOURCES
-    KFParticle/GPU/KFParticleGpuBufferManager.cxx
-    KFParticle/GPU/KFParticleGpuDecayPlan.cxx
-    KFParticle/GPU/KFParticleGpuDeviceImage.cxx
-    KFParticle/GPU/KFParticleGpuKernels.cxx
-    KFParticle/GPU/KFParticleGpuRuntime.cxx
-    KFParticle/GPU/KFParticleGpuSteering.cxx
-  )
-endif()
-
 set (SIMD_HEADERS
   KFParticle/KFPSimd/simd.h
 )
@@ -223,6 +212,20 @@ else(FIXTARGET)
 endif(FIXTARGET)
 
 if(KFPARTICLE_USE_XPU)
+  # Register host-side GPU sources on the final target. This keeps embedded
+  # CBMRoot and standalone builds on one source list and prevents a stale
+  # partial GPU library with unresolved graph-plan symbols.
+  target_sources(KFParticle PRIVATE
+    KFParticle/GPU/KFParticleGpuBufferManager.cxx
+    KFParticle/GPU/KFParticleGpuCpuChannelCatalogue.cxx
+    KFParticle/GPU/KFParticleGpuDecayGraphPlan.cxx
+    KFParticle/GPU/KFParticleGpuDecayPlan.cxx
+    KFParticle/GPU/KFParticleGpuDeviceImage.cxx
+    KFParticle/GPU/KFParticleGpuKernels.cxx
+    KFParticle/GPU/KFParticleGpuRoutingPlan.cxx
+    KFParticle/GPU/KFParticleGpuRuntime.cxx
+    KFParticle/GPU/KFParticleGpuSteering.cxx
+  )
   target_compile_definitions(KFParticle PUBLIC KFPARTICLE_USE_XPU)
   target_include_directories(KFParticle PUBLIC
     ${PROJECT_SOURCE_DIR}/KFParticle/GPU
