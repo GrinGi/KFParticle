@@ -3,6 +3,25 @@
 # Shared environment contract for the online cbmreco and offline FairRunAna
 # launchers. The mode wrappers own their framework-specific arguments.
 
+kfp_preflight_hash() {
+  if command -v sha256sum >/dev/null; then sha256sum "$@" | awk '{print $1}'
+  else shasum -a 256 "$@" | awk '{print $1}'; fi
+}
+kfp_preflight_source_fingerprint() (
+  export LC_ALL=C
+  cd "$1" || return
+  {
+    printf '%s\n' CMakeLists.txt
+    find algo reco cmake external/KFParticle external/xpu \
+      -type d \( -name .git -o -name .local -o -name __pycache__ -o -name build \) -prune -o \
+      -type f \( -name '*.h' -o -name '*.cxx' -o -name '*.cpp' -o -name '*.cmake' \
+      -o -name '*.tpp' -o -name '*.inc' -o -name '*.in' -o -name CMakeLists.txt \) -print
+  } | sort -u | while IFS= read -r file; do printf '%s\0' "$file"; done |
+    if command -v sha256sum >/dev/null; then xargs -0 sha256sum
+    else xargs -0 shasum -a 256; fi |
+    awk '{printf "%s%s", substr($0,67),substr($0,1,64)}' | kfp_preflight_hash
+)
+
 kfp_preflight_fail()
 {
   local label="$1"
@@ -240,7 +259,7 @@ kfp_preflight_append_performance_evidence()
     echo "performance monitoring: ${KFPARTICLE_GPU_PERFORMANCE_MONITORING:-0}"
     for log_file in "$@"; do
       [[ -f "${log_file}" ]] || continue
-      grep -E '^(PERFORMANCE_RUN|.*KFParticle GPU qualification metrics:|.*KFParticle GPU performance:|.*KFParticle GPU diagnostics:|.*KFParticle GPU routing monitoring:|.*KFP selector summary:|.*KFP online summary:)' \
+      grep -E '^(PERFORMANCE_RUN|.*KFParticle GPU qualification metrics:|.*KFParticle GPU performance:|.*KFParticle GPU diagnostics:|.*KFParticle GPU routing monitoring:|.*KFParticle GPU adaptive (online|offline) (shadow|calibration):|.*KFP selector summary:|.*KFP online summary:)' \
         "${log_file}" || true
       kfp_preflight_print_performance_report "${log_file}"
     done
@@ -254,7 +273,7 @@ kfp_preflight_runtime_smoke()
     return
   fi
 
-  local smoke="${KFP_PREFLIGHT_SCRIPT_DIR}/run_cbmroot_xpu_smoke.sh"
+  local smoke="${KFP_PREFLIGHT_SCRIPT_DIR}/run_cbmroot_regression.sh"
   local smoke_scope="${KFP_PREFLIGHT_MODE}"
   if [[ -n "${KFP_PREFLIGHT_INPUT_KIND:-}" ]]; then
     smoke_scope+="-${KFP_PREFLIGHT_INPUT_KIND}"
@@ -265,7 +284,101 @@ kfp_preflight_runtime_smoke()
   KFPARTICLE_CBMROOT_BUILD_DIR="${KFP_PREFLIGHT_BUILD_DIR}" \
   KFPARTICLE_CBMROOT_DEVICE="${KFP_PREFLIGHT_DEVICE}" \
   KFPARTICLE_CBMROOT_SMOKE_LOG_DIR="${KFP_PREFLIGHT_LOG_DIR}/${smoke_scope}" \
-    bash "${smoke}"
+    bash "${smoke}" runtime
+}
+
+# Shared KFP options; the wrappers keep framework-specific input and execution.
+kfp_preflight_options()
+{
+  kfp_mode="${KFPARTICLE_CBMROOT_KFP_MODE:-cpu-only}"
+  diagnostic_sample_period="${KFPARTICLE_CBMROOT_DIAGNOSTIC_SAMPLE_PERIOD:-1}"
+  event_batch_size="${KFPARTICLE_CBMROOT_EVENT_BATCH_SIZE:-}"
+  diagnostic_batch_events="${KFPARTICLE_CBMROOT_DIAGNOSTIC_BATCH_EVENTS:-${event_batch_size:-8}}"
+  materialization_threads="${KFPARTICLE_CBMROOT_KFP_MATERIALIZATION_THREADS:-0}"
+  packing_threads="${KFPARTICLE_CBMROOT_KFP_PACKING_THREADS:-0}"
+  adaptive_minimum_work="${KFPARTICLE_CBMROOT_ADAPTIVE_MINIMUM_WORK:-0}"
+  adaptive_target_work="${KFPARTICLE_CBMROOT_ADAPTIVE_TARGET_WORK:-0}"
+  adaptive_maximum_bytes="${KFPARTICLE_CBMROOT_ADAPTIVE_MAXIMUM_BYTES:-0}"
+  execute="${KFPARTICLE_CBMROOT_PREFLIGHT_EXECUTE:-0}"
+  performance_monitoring="${KFPARTICLE_GPU_PERFORMANCE_MONITORING:-0}"
+  allow_diagnostic_rejection="${KFPARTICLE_CBMROOT_PREFLIGHT_ALLOW_DIAGNOSTIC_REJECTION:-0}"
+  qualification_expectation="${KFPARTICLE_CBMROOT_QUALIFICATION_EXPECTATION:-locked}"
+}
+
+kfp_preflight_validate_options()
+{
+  case "${kfp_mode}" in
+    cpu|cpu-only) kfp_mode="cpu-only" ;;
+    diagnostic) ;;
+    qualified|qualified-gpu|validated|validated-gpu) kfp_mode="qualified-gpu" ;;
+    *) kfp_preflight_fail "${KFP_PREFLIGHT_LABEL}" \
+         "${KFP_PREFLIGHT_MODE} KFP mode must be cpu-only, diagnostic, or qualified-gpu" ;;
+  esac
+  if [[ ! "${diagnostic_sample_period}" =~ ^[1-9][0-9]*$ ]]; then
+    kfp_preflight_fail "${KFP_PREFLIGHT_LABEL}" \
+      "KFPARTICLE_CBMROOT_DIAGNOSTIC_SAMPLE_PERIOD must be positive"
+  fi
+  if [[ ! "${diagnostic_batch_events}" =~ ^[1-9][0-9]*$ ]]; then
+    kfp_preflight_fail "${KFP_PREFLIGHT_LABEL}" \
+      "KFPARTICLE_CBMROOT_DIAGNOSTIC_BATCH_EVENTS must be positive"
+  fi
+  if [[ ! "${materialization_threads}" =~ ^[0-9]+$ ]]; then
+    kfp_preflight_fail "${KFP_PREFLIGHT_LABEL}" \
+      "KFPARTICLE_CBMROOT_KFP_MATERIALIZATION_THREADS must be a non-negative integer"
+  fi
+  if [[ ! "${packing_threads}" =~ ^[0-9]+$ ]]; then
+    kfp_preflight_fail "${KFP_PREFLIGHT_LABEL}" \
+      "KFPARTICLE_CBMROOT_KFP_PACKING_THREADS must be a non-negative integer"
+  fi
+  if [[ -n "${event_batch_size}" && -n "${KFPARTICLE_CBMROOT_DIAGNOSTIC_BATCH_EVENTS:-}" \
+        && "${event_batch_size}" != "${KFPARTICLE_CBMROOT_DIAGNOSTIC_BATCH_EVENTS}" ]]; then
+    kfp_preflight_fail "${KFP_PREFLIGHT_LABEL}" \
+      "EVENT_BATCH_SIZE and DIAGNOSTIC_BATCH_EVENTS must agree when both are set"
+  fi
+  for adaptive_value in "${adaptive_minimum_work}" "${adaptive_target_work}" "${adaptive_maximum_bytes}"; do
+    if [[ ! "${adaptive_value}" =~ ^[0-9]+$ ]]; then
+      kfp_preflight_fail "${KFP_PREFLIGHT_LABEL}" \
+        "adaptive KFP workload and byte overrides must be non-negative integers"
+    fi
+  done
+  adaptive_override_count=0
+  for adaptive_value in "${adaptive_minimum_work}" "${adaptive_target_work}" "${adaptive_maximum_bytes}"; do
+    if [[ "${adaptive_value}" != "0" ]]; then
+      adaptive_override_count=$((adaptive_override_count + 1))
+    fi
+  done
+  if [[ "${adaptive_override_count}" != "0" && "${adaptive_override_count}" != "3" ]]; then
+    kfp_preflight_fail "${KFP_PREFLIGHT_LABEL}" \
+      "set all three KFPARTICLE_CBMROOT_ADAPTIVE_* overrides or leave all three at zero"
+  fi
+  if [[ "${adaptive_override_count}" == "3" \
+        && "${adaptive_target_work}" -lt "${adaptive_minimum_work}" ]]; then
+    kfp_preflight_fail "${KFP_PREFLIGHT_LABEL}" \
+      "KFPARTICLE_CBMROOT_ADAPTIVE_TARGET_WORK must not be below ADAPTIVE_MINIMUM_WORK"
+  fi
+  if [[ "${performance_monitoring}" != "0" && "${performance_monitoring}" != "1" ]]; then
+    kfp_preflight_fail "${KFP_PREFLIGHT_LABEL}" "KFPARTICLE_GPU_PERFORMANCE_MONITORING must be 0 or 1"
+  fi
+  case "${qualification_expectation}" in locked|published) ;; *)
+    kfp_preflight_fail "${KFP_PREFLIGHT_LABEL}" \
+      "KFPARTICLE_CBMROOT_QUALIFICATION_EXPECTATION must be locked or published"
+  esac
+  if [[ "${qualification_expectation}" == "published" \
+        && ("${kfp_mode}" != "qualified-gpu" || "${performance_monitoring}" != "1") ]]; then
+    kfp_preflight_fail "${KFP_PREFLIGHT_LABEL}" \
+      "published qualification expectation requires qualified-gpu mode and performance monitoring"
+  fi
+  kfp_preflight_check_qualification_build \
+    "$1" "${qualification_expectation}"
+  if [[ "${qualification_expectation}" == "published" \
+        && "${adaptive_override_count}" != "3" ]]; then
+    kfp_preflight_fail "${KFP_PREFLIGHT_LABEL}" \
+      "published qualified-gpu execution requires an enabled adaptive policy; set all three KFPARTICLE_CBMROOT_ADAPTIVE_* values"
+  fi
+  if [[ "${allow_diagnostic_rejection}" != "0" && "${allow_diagnostic_rejection}" != "1" ]]; then
+    kfp_preflight_fail "${KFP_PREFLIGHT_LABEL}" \
+      "KFPARTICLE_CBMROOT_PREFLIGHT_ALLOW_DIAGNOSTIC_REJECTION must be 0 or 1"
+  fi
 }
 
 kfp_preflight_initialize()

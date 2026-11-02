@@ -71,12 +71,16 @@ EOF
 for library in libxpu.so libKFParticle.so libxpu_Hip.so libKFParticle_Hip.so libAlgo.so libAlgoOffline.so libCbmRecoBase.so libCbmRecoTasks.so; do
   touch "${build_dir}/lib/${library}"
 done
-printf 'KFP online summary:\npid_assigned=\nsecondary_pos=\ncpu_candidates=\ndecay_channels=\nrefit_policy=\nqualification locked\nkfp_gpu_qualification_build=ordinary-v1\n20260803-real-data-pv-parity-v11\n' >>"${build_dir}/lib/libAlgo.so"
+printf 'KFP online summary:\npid_assigned=\nsecondary_pos=\ncpu_candidates=\ndecay_channels=\nrefit_policy=\nbatch_limit=\nqualification locked\nkfp_gpu_qualification_build=ordinary-v1\n20260803-real-data-pv-parity-v11\n20260820-kfp-gpu-single-host-owner-v1\n' >>"${build_dir}/lib/libAlgo.so"
 printf 'kfp_gpu_qualification_build=ordinary-v1\n' >>"${build_dir}/lib/libAlgoOffline.so"
-printf 'diagnostic_contract=\nqualification locked\n' >>"${build_dir}/lib/libCbmRecoTasks.so"
+printf 'diagnostic_contract=\nbatch_limit=\nqualification locked\nadaptive work=\n' >>"${build_dir}/lib/libCbmRecoTasks.so"
 cat >"${build_dir}/bin/cbmreco" <<'EOF'
 #!/usr/bin/env bash
 mode="config"
+if [[ "${KFPARTICLE_GPU_RETRY_RESOURCE_BATCHES:-unset}" != "${KFPARTICLE_TEST_EXPECT_RESOURCE_RETRY:-0}" ]]; then
+  echo "fixture received an unexpected resource retry mode" >&2
+  exit 1
+fi
 max_events=0
 pid_policy="detector"
 refit_policy="disabled"
@@ -111,8 +115,10 @@ pid_assigned="${KFPARTICLE_TEST_PID_ASSIGNED:-2}"
 selected_tracks="${KFPARTICLE_TEST_SELECTED_TRACKS:-2}"
 cpu_particles="${KFPARTICLE_TEST_CPU_PARTICLES:-3}"
 cpu_candidates="${KFPARTICLE_TEST_CPU_CANDIDATES:-1}"
-echo "[fixture $$] INFO: KFP online handoff: contract=1 TS=0 events_available=5 events=${max_events} processed=1 no_pv=1 conversion_failed=0 tracks=2 sts_hit_links=16 vertices=1 pid_slots=2 pid_assigned=${pid_assigned} selected_tracks=${selected_tracks} secondary_pos=1 secondary_neg=1 primary_pos=0 primary_neg=0 cpu_particles=${cpu_particles} cpu_candidates=${cpu_candidates} decay_channels=3 pid_policy=${pid_policy} refit_policy=${refit_policy} mode=${mode} diagnostic_contract=2 diagnostic_seen=${diagnostic_seen} diagnostic_ok=${diagnostic_seen} diagnostic_compared=${diagnostic_seen} diagnostic_matched=${diagnostic_seen} diagnostic_blocked=0 diagnostic_blockers=0"
-echo "[fixture $$] INFO: KFP online summary: contract=1 timeslices=1 events_available=5 events=${max_events} processed=1 no_pv=1 conversion_failed=0 tracks=2 sts_hit_links=16 vertices=1 pid_slots=2 pid_assigned=${pid_assigned} selected_tracks=${selected_tracks} secondary_pos=1 secondary_neg=1 primary_pos=0 primary_neg=0 cpu_particles=${cpu_particles} cpu_candidates=${cpu_candidates} decay_channels=3 pid_policy=${pid_policy} refit_policy=${refit_policy} mode=${mode} diagnostic_contract=2 diagnostic_seen=${diagnostic_seen} diagnostic_ok=${diagnostic_seen} diagnostic_compared=${diagnostic_seen} diagnostic_matched=${diagnostic_seen} diagnostic_blocked=0 diagnostic_blockers=0"
+observed_events="${KFPARTICLE_TEST_EVENTS:-${max_events}}"
+if [[ "${max_events}" == 0 ]]; then observed_events="${KFPARTICLE_TEST_EVENTS:-5}"; fi
+echo "[fixture $$] INFO: KFP online handoff: contract=1 handoff_phases=2 TS=0 events_available=5 events=${observed_events} processed=1 no_pv=1 conversion_failed=0 tracks=2 sts_hit_links=16 vertices=1 pid_slots=2 pid_assigned=${pid_assigned} selected_tracks=${selected_tracks} secondary_pos=1 secondary_neg=1 primary_pos=0 primary_neg=0 cpu_particles=${cpu_particles} cpu_candidates=${cpu_candidates} decay_channels=3 pid_policy=${pid_policy} refit_policy=${refit_policy} mode=${mode} diagnostic_contract=2 diagnostic_seen=${diagnostic_seen} diagnostic_ok=${diagnostic_seen} diagnostic_compared=${diagnostic_seen} diagnostic_matched=${diagnostic_seen} diagnostic_blocked=0 diagnostic_blockers=0"
+echo "[fixture $$] INFO: KFP online summary: contract=1 handoff_phases=2 timeslices=1 events_available=5 events=${observed_events} processed=1 no_pv=1 conversion_failed=0 tracks=2 sts_hit_links=16 vertices=1 pid_slots=2 pid_assigned=${pid_assigned} selected_tracks=${selected_tracks} secondary_pos=1 secondary_neg=1 primary_pos=0 primary_neg=0 cpu_particles=${cpu_particles} cpu_candidates=${cpu_candidates} decay_channels=3 pid_policy=${pid_policy} refit_policy=${refit_policy} mode=${mode} diagnostic_contract=2 diagnostic_seen=${diagnostic_seen} diagnostic_ok=${diagnostic_seen} diagnostic_compared=${diagnostic_seen} diagnostic_matched=${diagnostic_seen} diagnostic_blocked=0 diagnostic_blockers=0"
 exit 0
 EOF
 cat >"${build_dir}/bin/root" <<'EOF'
@@ -180,303 +186,226 @@ common_env=(
   KFPARTICLE_CBMROOT_OFFLINE_NUM_ENTRIES=1
   KFPARTICLE_CBMROOT_OFFLINE_REPEAT=1
   KFPARTICLE_CBMROOT_OFFLINE_ALLOW_LARGE_EVENT_RUN=0
+  KFPARTICLE_CBMROOT_ONLINE_INPUT_LOCATOR="${source_dir}/online-input.tsa"
+  KFPARTICLE_CBMROOT_OFFLINE_ROOT="${build_dir}/bin/root"
+  KFPARTICLE_CBMROOT_OFFLINE_CONFIG="${source_dir}/macro/algo/MainConfig.yaml"
+  KFPARTICLE_CBMROOT_OFFLINE_INPUT_PREFIX="${source_dir}/offline-input"
+  KFPARTICLE_CBMROOT_OFFLINE_INPUT_KIND=time-based
 )
 
+run_preflight()
+{
+  local mode="$1"
+  shift
+  env "${common_env[@]}" "$@" bash "${script_dir}/run_cbmroot_kfp_${mode}_preflight.sh"
+}
+
+expect_failure()
+{
+  local message="$1" log="$2"
+  shift 2
+  if "$@" >"$log" 2>&1; then
+    echo "FAIL preflight accepted a case requiring: $message" >&2
+    exit 1
+  fi
+  grep -q -- "$message" "$log"
+}
+
 online_log="${tmp_dir}/online.log"
-env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_ONLINE_INPUT_LOCATOR="${source_dir}/online-input.tsa" \
-  bash "${script_dir}/run_cbmroot_kfp_online_preflight.sh" >"${online_log}"
+run_preflight online >"${online_log}"
 grep -q '^PASS cbmroot-kfp-online-preflight' "${online_log}"
 grep -q -- '--kfp-mode cpu-only' "${online_log}"
 grep -q -- '--systems STS TOF' "${online_log}"
 grep -q -- '--event-reco-max-events 2' "${online_log}"
+grep -q '^  STS memory : exact per timeslice$' "${online_log}"
+grep -q '^  KFP materialization schedule: guided$' "${online_log}"
+grep -q '^  KFP resource retry: 0 ' "${online_log}"
 grep -q -- '--kfp-use-sts-pion-pid' "${online_log}"
 grep -q -- '--kfp-refit-tracks' "${online_log}"
 
+full_timeslice_log="${tmp_dir}/full-timeslice.log"
+run_preflight online KFPARTICLE_CBMROOT_ONLINE_MAX_EVENTS=0 \
+  KFPARTICLE_CBMROOT_PREFLIGHT_EXECUTE=1 >"${full_timeslice_log}"
+grep -q -- '--event-reco-max-events 0' "${full_timeslice_log}"
+grep -q '^PASS cbmroot-kfp-online-preflight' "${full_timeslice_log}"
+for retry in 0 1; do
+  retry_log="${tmp_dir}/resource-retry-${retry}.log"
+  run_preflight online KFPARTICLE_CBMROOT_PREFLIGHT_EXECUTE=1 \
+    KFPARTICLE_GPU_RETRY_RESOURCE_BATCHES="${retry}" \
+    KFPARTICLE_TEST_EXPECT_RESOURCE_RETRY="${retry}" >"${retry_log}"
+  grep -q "^  KFP resource retry: ${retry} " "${retry_log}"
+  grep -q "resource-retry=${retry}" \
+    "${build_dir}/kfparticle-cbmroot-preflight/online-cpu-only-hip1.evidence.txt"
+done
+for invalid in -1 2 bad; do
+  expect_failure 'RETRY_RESOURCE_BATCHES must be 0 or 1' "${tmp_dir}/invalid-resource-retry.log" \
+    run_preflight online KFPARTICLE_GPU_RETRY_RESOURCE_BATCHES="${invalid}"
+done
+expect_failure 'did not satisfy non-empty online KFP handoff contract 1' \
+  "${tmp_dir}/truncated-timeslice.log" run_preflight online \
+  KFPARTICLE_CBMROOT_ONLINE_MAX_EVENTS=0 KFPARTICLE_CBMROOT_PREFLIGHT_EXECUTE=1 \
+  KFPARTICLE_TEST_EVENTS=4
+for invalid in -1 bad; do
+  expect_failure 'MAX_EVENTS must be non-negative' "${tmp_dir}/invalid-limit.log" \
+    run_preflight online KFPARTICLE_CBMROOT_ONLINE_MAX_EVENTS="$invalid"
+done
+
+benchmark_schedule_log="${tmp_dir}/benchmark-materialization-schedule.log"
+if run_preflight online \
+  KFPARTICLE_GPU_MATERIALIZATION_SCHEDULE=weighted-contiguous \
+    >"${benchmark_schedule_log}" 2>&1; then
+  echo "FAIL preflight accepted benchmark-only materialization schedule without monitoring" >&2
+  exit 1
+fi
+grep -q 'non-default materialization schedules require performance monitoring' \
+  "${benchmark_schedule_log}"
+
+for profile in 0 1; do
+  timer_log="${tmp_dir}/construction-timers-${profile}.log"
+  if run_preflight online \
+      KFPARTICLE_CBMROOT_PREFLIGHT_EXECUTE=1 \
+    KFPARTICLE_GPU_CONSTRUCTION_TIMERS=1 XPU_PROFILE="${profile}" >"${timer_log}" 2>&1; then
+    echo "FAIL preflight accepted missing construction device timings" >&2
+    exit 1
+  fi
+  if [[ "${profile}" == 0 ]]; then
+    grep -q 'construction timers require XPU_PROFILE=1' "${timer_log}"
+  else
+    grep -q 'missing detailed XPU construction timers' "${timer_log}"
+  fi
+done
+
+online_batch_alias_log="${tmp_dir}/online-batch-alias.log"
+run_preflight online \
+  KFPARTICLE_CBMROOT_EVENT_BATCH_SIZE=64 \
+  KFPARTICLE_CBMROOT_KFP_MATERIALIZATION_THREADS=3 \
+  KFPARTICLE_CBMROOT_KFP_PACKING_THREADS=2 >"${online_batch_alias_log}"
+grep -q '^  KFP batch  : 64 event(s)$' "${online_batch_alias_log}"
+grep -q '^  KFP materialization threads: 3 ' "${online_batch_alias_log}"
+grep -q '^  KFP packing threads: 2 ' "${online_batch_alias_log}"
+grep -q -- '--kfp-diagnostic-batch-events 64' "${online_batch_alias_log}"
+grep -q -- '--kfp-materialization-threads 3' "${online_batch_alias_log}"
+grep -q -- '--kfp-packing-threads 2' "${online_batch_alias_log}"
+
+online_cpu_backend_log="${tmp_dir}/online-cpu-backend.log"
+run_preflight online \
+  KFPARTICLE_CBMROOT_ONLINE_TRACKING_BACKEND=cpu >"${online_cpu_backend_log}"
+grep -q '^PASS cbmroot-kfp-online-preflight' "${online_cpu_backend_log}"
+grep -q -- '--ca-timeslice-tracking-backend cpu' "${online_cpu_backend_log}"
+
 online_cpu_execute_log="${tmp_dir}/online-cpu-execute.log"
-env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_ONLINE_INPUT_LOCATOR="${source_dir}/online-input.tsa" \
+run_preflight online \
   KFPARTICLE_CBMROOT_ONLINE_REPEAT=2 \
-  KFPARTICLE_CBMROOT_PREFLIGHT_EXECUTE=1 \
-  bash "${script_dir}/run_cbmroot_kfp_online_preflight.sh" >"${online_cpu_execute_log}"
+  KFPARTICLE_CBMROOT_PREFLIGHT_EXECUTE=1 >"${online_cpu_execute_log}"
 grep -q '^PASS cbmroot-kfp-online-preflight.*completed 2 run(s)' "${online_cpu_execute_log}"
 test -f "${build_dir}/kfparticle-cbmroot-preflight/online-cpu-only-hip1.evidence.txt"
 
+online_cpu_adaptive_log="${tmp_dir}/online-cpu-adaptive.log"
+run_preflight online \
+  KFPARTICLE_CBMROOT_PREFLIGHT_EXECUTE=1 \
+  KFPARTICLE_CBMROOT_ADAPTIVE_MINIMUM_WORK=1 \
+  KFPARTICLE_CBMROOT_ADAPTIVE_TARGET_WORK=1 \
+  KFPARTICLE_CBMROOT_ADAPTIVE_MAXIMUM_BYTES=1024 >"${online_cpu_adaptive_log}"
+grep -q '^PASS cbmroot-kfp-online-preflight' "${online_cpu_adaptive_log}"
+
 online_diagnostic_execute_log="${tmp_dir}/online-diagnostic-execute.log"
-env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_ONLINE_INPUT_LOCATOR="${source_dir}/online-input.tsa" \
+run_preflight online \
   KFPARTICLE_CBMROOT_KFP_MODE=diagnostic \
   KFPARTICLE_CBMROOT_ONLINE_REPEAT=2 \
-  KFPARTICLE_CBMROOT_PREFLIGHT_EXECUTE=1 \
-  bash "${script_dir}/run_cbmroot_kfp_online_preflight.sh" >"${online_diagnostic_execute_log}"
+  KFPARTICLE_CBMROOT_PREFLIGHT_EXECUTE=1 >"${online_diagnostic_execute_log}"
 grep -q '^PASS cbmroot-kfp-online-preflight.*completed 2 run(s)' "${online_diagnostic_execute_log}"
 test -f "${build_dir}/kfparticle-cbmroot-preflight/online-diagnostic-hip1.evidence.txt"
 
 empty_online_log="${tmp_dir}/empty-online.log"
-if env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_ONLINE_INPUT_LOCATOR="${source_dir}/online-input.tsa" \
+expect_failure 'did not satisfy non-empty online KFP handoff contract 1' "${empty_online_log}" \
+  run_preflight online \
   KFPARTICLE_CBMROOT_PREFLIGHT_EXECUTE=1 \
-  KFPARTICLE_TEST_CPU_CANDIDATES=0 \
-  bash "${script_dir}/run_cbmroot_kfp_online_preflight.sh" >"${empty_online_log}" 2>&1; then
-  echo "FAIL cbmroot-kfp-preflight-contract - empty online KFP result was accepted" >&2
-  exit 1
-fi
-grep -q 'did not satisfy non-empty online KFP handoff contract 1' "${empty_online_log}"
+  KFPARTICLE_TEST_CPU_CANDIDATES=0
 
 offline_log="${tmp_dir}/offline.log"
-env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_OFFLINE_ROOT="${build_dir}/bin/root" \
-  KFPARTICLE_CBMROOT_OFFLINE_CONFIG="${source_dir}/macro/algo/MainConfig.yaml" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_PREFIX="${source_dir}/offline-input" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_KIND=time-based \
-  bash "${script_dir}/run_cbmroot_kfp_offline_preflight.sh" >"${offline_log}"
+run_preflight offline \
+  KFPARTICLE_CBMROOT_KFP_MATERIALIZATION_THREADS=3 \
+  KFPARTICLE_CBMROOT_KFP_PACKING_THREADS=2 >"${offline_log}"
 grep -q '^PASS cbmroot-kfp-offline-preflight' "${offline_log}"
 grep -q 'KfpSelectorChain prerequisites' "${offline_log}"
+grep -q '^  KFP materialization threads: 3 ' "${offline_log}"
+grep -q '^  KFP packing threads: 2 ' "${offline_log}"
 test -f "${build_dir}/kfparticle-cbmroot-preflight/offline-time-based-cpu-only-hip1.evidence.txt"
 
 offline_event_log="${tmp_dir}/offline-event.log"
-env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_OFFLINE_ROOT="${build_dir}/bin/root" \
-  KFPARTICLE_CBMROOT_OFFLINE_CONFIG="${source_dir}/macro/algo/MainConfig.yaml" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_PREFIX="${source_dir}/offline-input" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_KIND=event-based \
-  bash "${script_dir}/run_cbmroot_kfp_offline_preflight.sh" >"${offline_event_log}"
+run_preflight offline \
+  KFPARTICLE_CBMROOT_OFFLINE_INPUT_KIND=event-based >"${offline_event_log}"
 grep -q '^PASS cbmroot-kfp-offline-preflight' "${offline_event_log}"
 test -f "${build_dir}/kfparticle-cbmroot-preflight/offline-event-based-cpu-only-hip1.evidence.txt"
 
 offline_diagnostic_log="${tmp_dir}/offline-diagnostic.log"
-env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_OFFLINE_ROOT="${build_dir}/bin/root" \
-  KFPARTICLE_CBMROOT_OFFLINE_CONFIG="${source_dir}/macro/algo/MainConfig.yaml" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_PREFIX="${source_dir}/offline-input" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_KIND=time-based \
-  KFPARTICLE_CBMROOT_KFP_MODE=diagnostic \
-  bash "${script_dir}/run_cbmroot_kfp_offline_preflight.sh" >"${offline_diagnostic_log}"
+run_preflight offline \
+  KFPARTICLE_CBMROOT_KFP_MODE=diagnostic >"${offline_diagnostic_log}"
 grep -q '^PASS cbmroot-kfp-offline-preflight' "${offline_diagnostic_log}"
 test -f "${build_dir}/kfparticle-cbmroot-preflight/offline-time-based-diagnostic-hip1.evidence.txt"
 
 stale_library_log="${tmp_dir}/stale-library.log"
 : >"${build_dir}/lib/libCbmRecoTasks.so"
-if env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_OFFLINE_ROOT="${build_dir}/bin/root" \
-  KFPARTICLE_CBMROOT_OFFLINE_CONFIG="${source_dir}/macro/algo/MainConfig.yaml" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_PREFIX="${source_dir}/offline-input" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_KIND=time-based \
-  KFPARTICLE_CBMROOT_KFP_MODE=diagnostic \
-  bash "${script_dir}/run_cbmroot_kfp_offline_preflight.sh" >"${stale_library_log}" 2>&1; then
-  echo "FAIL cbmroot-kfp-preflight-contract - stale CbmRecoTasks library was accepted" >&2
-  exit 1
-fi
-grep -q 'libCbmRecoTasks.so predates diagnostic contract 2' "${stale_library_log}"
-printf 'diagnostic_contract=\nqualification locked\n' >"${build_dir}/lib/libCbmRecoTasks.so"
+expect_failure 'libCbmRecoTasks.so predates diagnostic contract 2' "${stale_library_log}" \
+  run_preflight offline \
+  KFPARTICLE_CBMROOT_KFP_MODE=diagnostic
+printf 'diagnostic_contract=\nbatch_limit=\nqualification locked\nadaptive work=\n' >"${build_dir}/lib/libCbmRecoTasks.so"
 
 offline_execute_log="${tmp_dir}/offline-execute.log"
 printf 'completed fixture output\n' >"${source_dir}/offline-output.reco.root"
-env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_OFFLINE_ROOT="${build_dir}/bin/root" \
-  KFPARTICLE_CBMROOT_OFFLINE_CONFIG="${source_dir}/macro/algo/MainConfig.yaml" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_PREFIX="${source_dir}/offline-input" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_KIND=time-based \
+run_preflight offline \
   KFPARTICLE_CBMROOT_KFP_MODE=diagnostic \
   KFPARTICLE_CBMROOT_OFFLINE_REPEAT=2 \
   KFPARTICLE_CBMROOT_PREFLIGHT_EXECUTE=1 \
-  KFPARTICLE_TEST_ROOT_SHUTDOWN_FAILURE=1 \
-  bash "${script_dir}/run_cbmroot_kfp_offline_preflight.sh" >"${offline_execute_log}"
+  KFPARTICLE_TEST_ROOT_SHUTDOWN_FAILURE=1 >"${offline_execute_log}"
 grep -q '^PASS cbmroot-kfp-offline-preflight.*completed 2 run(s)' "${offline_execute_log}"
 grep -q 'ignored FairRoot shutdown status 134 after complete output' "${offline_execute_log}"
 test -f "${build_dir}/kfparticle-cbmroot-preflight/offline-time-based-diagnostic-hip1.run-1.log"
 test -f "${build_dir}/kfparticle-cbmroot-preflight/offline-time-based-diagnostic-hip1.run-2.log"
 
 offline_event_cpu_execute_log="${tmp_dir}/offline-event-cpu-execute.log"
-env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_OFFLINE_ROOT="${build_dir}/bin/root" \
-  KFPARTICLE_CBMROOT_OFFLINE_CONFIG="${source_dir}/macro/algo/MainConfig.yaml" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_PREFIX="${source_dir}/offline-input" \
+run_preflight offline \
   KFPARTICLE_CBMROOT_OFFLINE_INPUT_KIND=event-based \
   KFPARTICLE_CBMROOT_KFP_MODE=cpu-only \
-  KFPARTICLE_CBMROOT_PREFLIGHT_EXECUTE=1 \
-  bash "${script_dir}/run_cbmroot_kfp_offline_preflight.sh" >"${offline_event_cpu_execute_log}"
+  KFPARTICLE_CBMROOT_PREFLIGHT_EXECUTE=1 >"${offline_event_cpu_execute_log}"
 
 offline_event_diagnostic_execute_log="${tmp_dir}/offline-event-diagnostic-execute.log"
-env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_OFFLINE_ROOT="${build_dir}/bin/root" \
-  KFPARTICLE_CBMROOT_OFFLINE_CONFIG="${source_dir}/macro/algo/MainConfig.yaml" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_PREFIX="${source_dir}/offline-input" \
+run_preflight offline \
   KFPARTICLE_CBMROOT_OFFLINE_INPUT_KIND=event-based \
   KFPARTICLE_CBMROOT_KFP_MODE=diagnostic \
-  KFPARTICLE_CBMROOT_PREFLIGHT_EXECUTE=1 \
-  bash "${script_dir}/run_cbmroot_kfp_offline_preflight.sh" >"${offline_event_diagnostic_execute_log}"
-
-online_campaign_log="${tmp_dir}/online-campaign.log"
-env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_ONLINE_INPUT_LOCATOR="${source_dir}/online-input.tsa" \
-  KFPARTICLE_CBMROOT_ONLINE_REPEAT=2 \
-  bash "${script_dir}/run_cbmroot_kfp_online_campaign.sh" >"${online_campaign_log}"
-grep -q '^PASS cbmroot-kfp-online-campaign' "${online_campaign_log}"
-
-cross_mode_log="${tmp_dir}/cross-mode.log"
-env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_CROSS_MODE_INPUT_RELATION=independent \
-  bash "${script_dir}/run_cbmroot_kfp_cross_mode_qualification.sh" >"${cross_mode_log}"
-grep -q '^PASS cbmroot-kfp-cross-mode' "${cross_mode_log}"
-
-write_qualification_evidence()
-{
-  local path="$1"
-  local mode="$2"
-  local wall1="$3"
-  local wall2="$4"
-  local wall3="$5"
-  {
-    echo "source: ${source_dir}"
-    echo "source revision: fixture-revision"
-    echo "build: ${build_dir}"
-    echo "qualification build: trial"
-    echo "device: hip1"
-    echo "XPU HIP architecture: gfx906;gfx908"
-    echo "ROCm: fixture"
-    echo "FairRoot: /fixture/fairroot"
-    echo "ROOT: fixture"
-    echo "input: fixture-input"
-    echo "parameters: fixture-parameters"
-    echo "configuration: ${tmp_dir}/qualification-gate.yaml"
-    echo "result: KFP selector summary: mode=${mode} diagnostic_blocked=0 diagnostic_blockers=0"
-    echo "PERFORMANCE_RUN mode=${mode} run=1 wall_ms=${wall1}"
-    echo "PERFORMANCE_RUN mode=${mode} run=2 wall_ms=${wall2}"
-    echo "PERFORMANCE_RUN mode=${mode} run=3 wall_ms=${wall3}"
-  } >"${path}"
-}
-
-cat >"${tmp_dir}/qualification-gate.yaml" <<'EOF'
-kfp:
-  selector:
-    decays:
-      - pdg: 310
-      - pdg: 3122
-      - pdg: -3122
-EOF
-qualification_cpu="${tmp_dir}/qualification-cpu.evidence.txt"
-qualification_diagnostic="${tmp_dir}/qualification-diagnostic.evidence.txt"
-qualification_gpu="${tmp_dir}/qualification-gpu.evidence.txt"
-write_qualification_evidence "${qualification_cpu}" cpu-only 1000 1010 990
-write_qualification_evidence "${qualification_diagnostic}" diagnostic 1250 1260 1240
-write_qualification_evidence "${qualification_gpu}" qualified-gpu 790 800 810
-for run in 1 2 3; do
-  echo "KFParticle GPU qualification metrics: events=10 completed=10 failed=0 cpu_reference_ms=100 transaction_ms=180" \
-    >>"${qualification_diagnostic}"
-  echo "KFParticle GPU diagnostics: events 10, timings [CPU reference 100, transaction 180] ms" \
-    >>"${qualification_diagnostic}"
-  echo "KFParticle GPU qualification metrics: events=10 completed=10 failed=0 cpu_reference_ms=0 transaction_ms=80" \
-    >>"${qualification_gpu}"
-  echo "KFParticle GPU diagnostics: events 10, timings [CPU reference 0, transaction 80] ms" \
-    >>"${qualification_gpu}"
-  echo "KFParticle GPU performance: samples=10 allocated_high_water_bytes=1048576" \
-    >>"${qualification_gpu}"
-  echo "KFParticle GPU routing monitoring: GPU accepted 9, CPU requested 0, diagnostic 0, not sampled 0, qualification locked 0, fallback unsupported/runtime/input/field/overflow/validation/materialization/execution 0/0/1/0/0/0/0/0" \
-    >>"${qualification_gpu}"
-done
-
-qualification_log="${tmp_dir}/qualification.log"
-env \
-  KFPARTICLE_CBMROOT_QUALIFICATION_MODE=online \
-  KFPARTICLE_CBMROOT_QUALIFICATION_WORKLOAD=fixture \
-  KFPARTICLE_CBMROOT_QUALIFICATION_CPU_EVIDENCE="${qualification_cpu}" \
-  KFPARTICLE_CBMROOT_QUALIFICATION_DIAGNOSTIC_EVIDENCE="${qualification_diagnostic}" \
-  KFPARTICLE_CBMROOT_QUALIFICATION_GPU_EVIDENCE="${qualification_gpu}" \
-  bash "${script_dir}/run_cbmroot_kfp_qualification_gate.sh" >"${qualification_log}"
-grep -q '^PASS cbmroot-kfp-qualification-online' "${qualification_log}"
-grep -q '^decision: qualified' "${tmp_dir}/qualification-online-fixture.evidence.txt"
-
-qualification_slow_gpu="${tmp_dir}/qualification-slow-gpu.evidence.txt"
-sed 's/wall_ms=790/wall_ms=1190/; s/wall_ms=800/wall_ms=1200/; s/wall_ms=810/wall_ms=1210/' \
-  "${qualification_gpu}" >"${qualification_slow_gpu}"
-qualification_slow_log="${tmp_dir}/qualification-slow.log"
-if env \
-  KFPARTICLE_CBMROOT_QUALIFICATION_MODE=offline \
-  KFPARTICLE_CBMROOT_QUALIFICATION_WORKLOAD=fixture \
-  KFPARTICLE_CBMROOT_QUALIFICATION_CPU_EVIDENCE="${qualification_cpu}" \
-  KFPARTICLE_CBMROOT_QUALIFICATION_DIAGNOSTIC_EVIDENCE="${qualification_diagnostic}" \
-  KFPARTICLE_CBMROOT_QUALIFICATION_GPU_EVIDENCE="${qualification_slow_gpu}" \
-  bash "${script_dir}/run_cbmroot_kfp_qualification_gate.sh" >"${qualification_slow_log}" 2>&1; then
-  echo "FAIL cbmroot-kfp-preflight-contract - slow qualified route was accepted" >&2
-  exit 1
-fi
-grep -q 'end-to-end speedup .* is below' "${qualification_slow_log}"
-
-cat >"${tmp_dir}/qualification-source.yaml" <<'EOF'
-kfp:
-  selector:
-    decays:
-      - pdg: 310
-        minInvMass: 0.45
-      - pdg: 3122
-        minInvMass: 1.10
-      - pdg: 3312
-        minInvMass: 1.30
-      - pdg: 3334
-        minInvMass: 1.64
-    preSelection:
-      minTrackerHits: 3
-    finderCuts:
-      Chi2Cut2D: 3.
-  pid:
-    useStsELoss: false
-EOF
-python3 "${script_dir}/make_step20_v0_qualification_config.py" \
-  "${tmp_dir}/qualification-source.yaml" "${tmp_dir}/qualification-v0.yaml" \
-  >"${tmp_dir}/qualification-config.log"
-grep -q 'pdg: 310' "${tmp_dir}/qualification-v0.yaml"
-grep -q 'pdg: 3122' "${tmp_dir}/qualification-v0.yaml"
-grep -q 'pdg: -3122' "${tmp_dir}/qualification-v0.yaml"
-if grep -qE 'pdg: (3312|3334)|finderCuts:' "${tmp_dir}/qualification-v0.yaml"; then
-  echo "FAIL cbmroot-kfp-preflight-contract - qualification config retained unsupported scope" >&2
-  exit 1
-fi
+  KFPARTICLE_CBMROOT_PREFLIGHT_EXECUTE=1 >"${offline_event_diagnostic_execute_log}"
 
 blocked_diagnostic_log="${tmp_dir}/blocked-diagnostic.log"
-if env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_OFFLINE_ROOT="${build_dir}/bin/root" \
-  KFPARTICLE_CBMROOT_OFFLINE_CONFIG="${source_dir}/macro/algo/MainConfig.yaml" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_PREFIX="${source_dir}/offline-input" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_KIND=time-based \
+expect_failure 'did not satisfy diagnostic physics contract 2' "${blocked_diagnostic_log}" \
+  run_preflight offline \
   KFPARTICLE_CBMROOT_KFP_MODE=diagnostic \
   KFPARTICLE_CBMROOT_PREFLIGHT_EXECUTE=1 \
-  KFPARTICLE_TEST_DIAGNOSTIC_BLOCKED=1 \
-  bash "${script_dir}/run_cbmroot_kfp_offline_preflight.sh" >"${blocked_diagnostic_log}" 2>&1; then
-  echo "FAIL cbmroot-kfp-preflight-contract - blocked CPU/GPU comparison was accepted" >&2
-  exit 1
-fi
-grep -q 'has missing, failed, or blocked CPU/GPU comparisons' "${blocked_diagnostic_log}"
+  KFPARTICLE_TEST_DIAGNOSTIC_BLOCKED=1
+
+retained_diagnostic_log="${tmp_dir}/retained-blocked-diagnostic.log"
+retained_diagnostic_evidence="${tmp_dir}/retained-blocked-diagnostic.evidence.txt"
+run_preflight offline \
+  KFPARTICLE_CBMROOT_KFP_MODE=diagnostic \
+  KFPARTICLE_CBMROOT_PREFLIGHT_EXECUTE=1 \
+  KFPARTICLE_CBMROOT_PREFLIGHT_ALLOW_DIAGNOSTIC_REJECTION=1 \
+  KFPARTICLE_CBMROOT_PREFLIGHT_EVIDENCE_FILE="${retained_diagnostic_evidence}" \
+  KFPARTICLE_TEST_DIAGNOSTIC_BLOCKED=1 >"${retained_diagnostic_log}" 2>&1
+grep -q 'REJECTED run 1/1: diagnostic physics contract blocked' "${retained_diagnostic_log}"
+grep -Eq '^result: .*diagnostic_blocked=1 .*diagnostic_blockers=32' "${retained_diagnostic_evidence}"
 
 stale_diagnostic_log="${tmp_dir}/stale-diagnostic.log"
-if env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_OFFLINE_ROOT="${build_dir}/bin/root" \
-  KFPARTICLE_CBMROOT_OFFLINE_CONFIG="${source_dir}/macro/algo/MainConfig.yaml" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_PREFIX="${source_dir}/offline-input" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_KIND=time-based \
+expect_failure 'did not complete diagnostic contract 2' "${stale_diagnostic_log}" \
+  run_preflight offline \
   KFPARTICLE_CBMROOT_KFP_MODE=diagnostic \
   KFPARTICLE_CBMROOT_PREFLIGHT_EXECUTE=1 \
-  KFPARTICLE_TEST_DIAGNOSTIC_SEEN=2 \
-  bash "${script_dir}/run_cbmroot_kfp_offline_preflight.sh" >"${stale_diagnostic_log}" 2>&1; then
-  echo "FAIL cbmroot-kfp-preflight-contract - duplicate diagnostic accounting was accepted" >&2
-  exit 1
-fi
-grep -q 'has missing, failed, or blocked CPU/GPU comparisons' "${stale_diagnostic_log}"
+  KFPARTICLE_TEST_DIAGNOSTIC_SEEN=2
 
 early_failure_log="${tmp_dir}/early-root-failure.log"
-if env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_OFFLINE_ROOT="${build_dir}/bin/root" \
-  KFPARTICLE_CBMROOT_OFFLINE_CONFIG="${source_dir}/macro/algo/MainConfig.yaml" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_PREFIX="${source_dir}/offline-input" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_KIND=time-based \
+expect_failure 'fixture reconstruction failed before completion' "${early_failure_log}" \
+  run_preflight offline \
   KFPARTICLE_CBMROOT_KFP_MODE=cpu-only \
   KFPARTICLE_CBMROOT_PREFLIGHT_EXECUTE=1 \
-  KFPARTICLE_TEST_ROOT_EARLY_FAILURE=1 \
-  bash "${script_dir}/run_cbmroot_kfp_offline_preflight.sh" >"${early_failure_log}" 2>&1; then
-  echo "FAIL cbmroot-kfp-preflight-contract - early ROOT failure was accepted" >&2
-  exit 1
-fi
-grep -q 'fixture reconstruction failed before completion' "${early_failure_log}"
+  KFPARTICLE_TEST_ROOT_EARLY_FAILURE=1
 
 cat >"${source_dir}/macro/algo/MissingEventSelector.yaml" <<'EOF'
 kfp:
@@ -492,124 +421,62 @@ kfp:
     decays: []
 EOF
 missing_event_selector_log="${tmp_dir}/missing-event-selector.log"
-if env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_OFFLINE_ROOT="${build_dir}/bin/root" \
-  KFPARTICLE_CBMROOT_OFFLINE_CONFIG="${source_dir}/macro/algo/MissingEventSelector.yaml" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_PREFIX="${source_dir}/offline-input" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_KIND=time-based \
-  bash "${script_dir}/run_cbmroot_kfp_offline_preflight.sh" >"${missing_event_selector_log}" 2>&1; then
-  echo "FAIL cbmroot-kfp-preflight-contract - missing eventSelector was accepted" >&2
-  exit 1
-fi
-grep -q 'missing the top-level eventSelector node' "${missing_event_selector_log}"
+expect_failure 'missing the top-level eventSelector node' "${missing_event_selector_log}" \
+  run_preflight offline \
+  KFPARTICLE_CBMROOT_OFFLINE_CONFIG="${source_dir}/macro/algo/MissingEventSelector.yaml"
 
 sed '/doRefitTracks:/d' "${source_dir}/macro/algo/MainConfig.yaml" \
   >"${source_dir}/macro/algo/MissingDoRefitTracks.yaml"
 missing_refit_log="${tmp_dir}/missing-refit.log"
-if env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_OFFLINE_ROOT="${build_dir}/bin/root" \
-  KFPARTICLE_CBMROOT_OFFLINE_CONFIG="${source_dir}/macro/algo/MissingDoRefitTracks.yaml" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_PREFIX="${source_dir}/offline-input" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_KIND=time-based \
-  bash "${script_dir}/run_cbmroot_kfp_offline_preflight.sh" >"${missing_refit_log}" 2>&1; then
-  echo "FAIL cbmroot-kfp-preflight-contract - missing doRefitTracks was accepted" >&2
-  exit 1
-fi
-grep -q 'kfp.selector must define doRefitTracks' "${missing_refit_log}"
+expect_failure 'kfp.selector must define doRefitTracks' "${missing_refit_log}" \
+  run_preflight offline \
+  KFPARTICLE_CBMROOT_OFFLINE_CONFIG="${source_dir}/macro/algo/MissingDoRefitTracks.yaml"
 
 wrong_device_log="${tmp_dir}/wrong-device.log"
-if env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_DEVICE=cpu \
-  KFPARTICLE_CBMROOT_ONLINE_INPUT_LOCATOR="${source_dir}/online-input.tsa" \
-  bash "${script_dir}/run_cbmroot_kfp_online_preflight.sh" >"${wrong_device_log}" 2>&1; then
-  echo "FAIL cbmroot-kfp-preflight-contract - non-HIP device was accepted" >&2
-  exit 1
-fi
-grep -q 'requires an explicit HIP device' "${wrong_device_log}"
+expect_failure 'requires an explicit HIP device' "${wrong_device_log}" \
+  run_preflight online \
+  KFPARTICLE_CBMROOT_DEVICE=cpu
 
 sed 's/recoParameters: reco.par.bin/recoParameters: missing-reco.par.bin/' \
   "${source_dir}/macro/algo/MainConfig.yaml" \
   >"${source_dir}/macro/algo/MissingParameters.yaml"
 missing_parameters_log="${tmp_dir}/missing-parameters.log"
-if env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_ONLINE_CONFIG="${source_dir}/macro/algo/MissingParameters.yaml" \
-  KFPARTICLE_CBMROOT_ONLINE_INPUT_LOCATOR="${source_dir}/online-input.tsa" \
-  bash "${script_dir}/run_cbmroot_kfp_online_preflight.sh" >"${missing_parameters_log}" 2>&1; then
-  echo "FAIL cbmroot-kfp-preflight-contract - missing online parameters were accepted" >&2
-  exit 1
-fi
-grep -q 'missing online reconstruction parameter archive' "${missing_parameters_log}"
+expect_failure 'missing online reconstruction parameter archive' "${missing_parameters_log}" \
+  run_preflight online \
+  KFPARTICLE_CBMROOT_ONLINE_CONFIG="${source_dir}/macro/algo/MissingParameters.yaml"
 
 single_backend_log="${tmp_dir}/single-backend.log"
-if env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_OFFLINE_ROOT="${build_dir}/bin/root" \
-  KFPARTICLE_CBMROOT_OFFLINE_CONFIG="${source_dir}/macro/algo/MainConfig.yaml" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_PREFIX="${source_dir}/offline-input" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_KIND=time-based \
-  KFPARTICLE_CBMROOT_OFFLINE_TRACKING_BACKEND=gpu-single \
-  bash "${script_dir}/run_cbmroot_kfp_offline_preflight.sh" >"${single_backend_log}" 2>&1; then
-  echo "FAIL cbmroot-kfp-preflight-contract - gpu-single was accepted for the Step 19 data" >&2
-  exit 1
-fi
-grep -q 'require gpu-multi or gpu-multi-window' "${single_backend_log}"
+expect_failure 'require gpu-multi or gpu-multi-window' "${single_backend_log}" \
+  run_preflight offline \
+  KFPARTICLE_CBMROOT_OFFLINE_TRACKING_BACKEND=gpu-single
 
 large_event_log="${tmp_dir}/large-event.log"
-if env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_OFFLINE_ROOT="${build_dir}/bin/root" \
-  KFPARTICLE_CBMROOT_OFFLINE_CONFIG="${source_dir}/macro/algo/MainConfig.yaml" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_PREFIX="${source_dir}/offline-input" \
+expect_failure 'event-based preflight is limited to 100 entries' "${large_event_log}" \
+  run_preflight offline \
   KFPARTICLE_CBMROOT_OFFLINE_INPUT_KIND=event-based \
-  KFPARTICLE_CBMROOT_OFFLINE_NUM_ENTRIES=101 \
-  bash "${script_dir}/run_cbmroot_kfp_offline_preflight.sh" >"${large_event_log}" 2>&1; then
-  echo "FAIL cbmroot-kfp-preflight-contract - oversized event-based preflight was accepted" >&2
-  exit 1
-fi
-grep -q 'event-based preflight is limited to 100 entries' "${large_event_log}"
+  KFPARTICLE_CBMROOT_OFFLINE_NUM_ENTRIES=101
 
 qualified_mode_log="${tmp_dir}/qualified-mode.log"
-env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_OFFLINE_ROOT="${build_dir}/bin/root" \
-  KFPARTICLE_CBMROOT_OFFLINE_CONFIG="${source_dir}/macro/algo/MainConfig.yaml" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_PREFIX="${source_dir}/offline-input" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_KIND=time-based \
-  KFPARTICLE_CBMROOT_KFP_MODE=qualified-gpu \
-  bash "${script_dir}/run_cbmroot_kfp_offline_preflight.sh" >"${qualified_mode_log}" 2>&1
+run_preflight offline \
+  KFPARTICLE_CBMROOT_KFP_MODE=qualified-gpu >"${qualified_mode_log}" 2>&1
 grep -q 'KFP mode   : qualified-gpu' "${qualified_mode_log}"
 
 invalid_mode_log="${tmp_dir}/invalid-mode.log"
-if env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_OFFLINE_ROOT="${build_dir}/bin/root" \
-  KFPARTICLE_CBMROOT_OFFLINE_CONFIG="${source_dir}/macro/algo/MainConfig.yaml" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_PREFIX="${source_dir}/offline-input" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_KIND=time-based \
-  KFPARTICLE_CBMROOT_KFP_MODE=automatic \
-  bash "${script_dir}/run_cbmroot_kfp_offline_preflight.sh" >"${invalid_mode_log}" 2>&1; then
-  echo "FAIL cbmroot-kfp-preflight-contract - unknown offline mode was accepted" >&2
-  exit 1
-fi
-grep -q 'offline KFP mode must be cpu-only, diagnostic, or qualified-gpu' "${invalid_mode_log}"
+expect_failure 'offline KFP mode must be cpu-only, diagnostic, or qualified-gpu' "${invalid_mode_log}" \
+  run_preflight offline \
+  KFPARTICLE_CBMROOT_KFP_MODE=automatic
 
 ordinary_as_trial_log="${tmp_dir}/ordinary-as-trial.log"
-if env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_ONLINE_INPUT_LOCATOR="${source_dir}/online-input.tsa" \
-  KFPARTICLE_CBMROOT_EXPECT_QUALIFICATION_BUILD=trial \
-  bash "${script_dir}/run_cbmroot_kfp_online_preflight.sh" >"${ordinary_as_trial_log}" 2>&1; then
-  echo "FAIL cbmroot-kfp-preflight-contract - ordinary build was accepted as a qualification trial" >&2
-  exit 1
-fi
-grep -q 'qualification build mismatch: expected trial, found ordinary' "${ordinary_as_trial_log}"
+expect_failure 'qualification build mismatch: expected trial, found ordinary' "${ordinary_as_trial_log}" \
+  run_preflight online \
+  KFPARTICLE_CBMROOT_EXPECT_QUALIFICATION_BUILD=trial
 
 ordinary_publish_log="${tmp_dir}/ordinary-publish.log"
-if env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_ONLINE_INPUT_LOCATOR="${source_dir}/online-input.tsa" \
+expect_failure 'qualification build mismatch: expected trial, found ordinary' "${ordinary_publish_log}" \
+  run_preflight online \
   KFPARTICLE_CBMROOT_KFP_MODE=qualified-gpu \
   KFPARTICLE_CBMROOT_QUALIFICATION_EXPECTATION=published \
-  KFPARTICLE_GPU_PERFORMANCE_MONITORING=1 \
-  bash "${script_dir}/run_cbmroot_kfp_online_preflight.sh" >"${ordinary_publish_log}" 2>&1; then
-  echo "FAIL cbmroot-kfp-preflight-contract - ordinary build was allowed to publish GPU results" >&2
-  exit 1
-fi
-grep -q 'qualification build mismatch: expected trial, found ordinary' "${ordinary_publish_log}"
+  KFPARTICLE_GPU_PERFORMANCE_MONITORING=1
 
 ordinary_build_dir="${tmp_dir}/ordinary-build"
 cp -R "${build_dir}" "${ordinary_build_dir}"
@@ -617,14 +484,9 @@ sed 's/CBM_KFPARTICLE_GPU_QUALIFICATION_TRIAL:BOOL=OFF/CBM_KFPARTICLE_GPU_QUALIF
   "${build_dir}/CMakeCache.txt" >"${build_dir}/CMakeCache.txt.new"
 mv "${build_dir}/CMakeCache.txt.new" "${build_dir}/CMakeCache.txt"
 stale_trial_log="${tmp_dir}/stale-trial.log"
-if env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_ONLINE_INPUT_LOCATOR="${source_dir}/online-input.tsa" \
-  KFPARTICLE_CBMROOT_EXPECT_QUALIFICATION_BUILD=trial \
-  bash "${script_dir}/run_cbmroot_kfp_online_preflight.sh" >"${stale_trial_log}" 2>&1; then
-  echo "FAIL cbmroot-kfp-preflight-contract - stale ordinary library was accepted by a trial cache" >&2
-  exit 1
-fi
-grep -q 'libAlgo.so does not match CBM_KFPARTICLE_GPU_QUALIFICATION_TRIAL=ON' "${stale_trial_log}"
+expect_failure 'libAlgo.so does not match CBM_KFPARTICLE_GPU_QUALIFICATION_TRIAL=ON' "${stale_trial_log}" \
+  run_preflight online \
+  KFPARTICLE_CBMROOT_EXPECT_QUALIFICATION_BUILD=trial
 
 for library in libAlgo.so libAlgoOffline.so; do
   sed 's/kfp_gpu_qualification_build=ordinary-v1/kfp_gpu_qualification_build=trial-v1/' \
@@ -632,35 +494,26 @@ for library in libAlgo.so libAlgoOffline.so; do
   mv "${build_dir}/lib/${library}.new" "${build_dir}/lib/${library}"
 done
 trial_online_log="${tmp_dir}/trial-online.log"
-env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_ONLINE_INPUT_LOCATOR="${source_dir}/online-input.tsa" \
-  KFPARTICLE_CBMROOT_EXPECT_QUALIFICATION_BUILD=trial \
-  bash "${script_dir}/run_cbmroot_kfp_online_preflight.sh" >"${trial_online_log}"
+run_preflight online \
+  KFPARTICLE_CBMROOT_EXPECT_QUALIFICATION_BUILD=trial >"${trial_online_log}"
 grep -q 'qualification build: trial' "${trial_online_log}"
 
-trial_offline_log="${tmp_dir}/trial-offline.log"
-env "${common_env[@]}" \
-  KFPARTICLE_CBMROOT_OFFLINE_ROOT="${build_dir}/bin/root" \
-  KFPARTICLE_CBMROOT_OFFLINE_CONFIG="${source_dir}/macro/algo/MainConfig.yaml" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_PREFIX="${source_dir}/offline-input" \
-  KFPARTICLE_CBMROOT_OFFLINE_INPUT_KIND=time-based \
-  KFPARTICLE_CBMROOT_EXPECT_QUALIFICATION_BUILD=trial \
-  bash "${script_dir}/run_cbmroot_kfp_offline_preflight.sh" >"${trial_offline_log}"
-grep -q 'qualification build: trial' "${trial_offline_log}"
+missing_published_policy_log="${tmp_dir}/missing-published-policy.log"
+if run_preflight online \
+  KFPARTICLE_CBMROOT_KFP_MODE=qualified-gpu \
+  KFPARTICLE_CBMROOT_QUALIFICATION_EXPECTATION=published \
+  KFPARTICLE_GPU_PERFORMANCE_MONITORING=1 \
+    >"${missing_published_policy_log}" 2>&1; then
+  echo "FAIL cbmroot-kfp-preflight-contract - published GPU run accepted a disabled adaptive policy" >&2
+  exit 1
+fi
+grep -q 'published qualified-gpu execution requires an enabled adaptive policy' \
+  "${missing_published_policy_log}"
 
-trial_preflight_log="${tmp_dir}/qualification-trial-preflight.log"
-env \
-  KFPARTICLE_CBMROOT_SOURCE_DIR="${source_dir}" \
-  KFPARTICLE_CBMROOT_ORDINARY_BUILD_DIR="${ordinary_build_dir}" \
-  KFPARTICLE_CBMROOT_TRIAL_BUILD_DIR="${build_dir}" \
-  KFPARTICLE_CBMROOT_DEVICE=hip1 \
-  KFPARTICLE_CBMROOT_QUALIFICATION_SOURCE_CONFIG="${tmp_dir}/qualification-source.yaml" \
-  KFPARTICLE_CBMROOT_QUALIFICATION_CONFIG="${tmp_dir}/qualification-trial.yaml" \
-  KFPARTICLE_CBMROOT_QUALIFICATION_TRIAL_EVIDENCE="${tmp_dir}/qualification-trial.evidence.txt" \
-  bash "${script_dir}/run_cbmroot_kfp_qualification_trial_preflight.sh" >"${trial_preflight_log}"
-grep -q '^PASS cbmroot-kfp-qualification-trial-preflight' "${trial_preflight_log}"
-grep -q '^ordinary qualification trial: OFF$' "${tmp_dir}/qualification-trial.evidence.txt"
-grep -q '^trial qualification trial: ON$' "${tmp_dir}/qualification-trial.evidence.txt"
+trial_offline_log="${tmp_dir}/trial-offline.log"
+run_preflight offline \
+  KFPARTICLE_CBMROOT_EXPECT_QUALIFICATION_BUILD=trial >"${trial_offline_log}"
+grep -q 'qualification build: trial' "${trial_offline_log}"
 
 performance_report_log="${tmp_dir}/performance-report.log"
 cat >"${performance_report_log}" <<'EOF'
@@ -685,4 +538,66 @@ if grep -q 'unrelated' <<<"${performance_report}"; then
   exit 1
 fi
 
-echo "PASS cbmroot-kfp-preflight-contract - shared XPU/build checks, qualification-build identity, and independent online/offline contracts work"
+# Exercise all regression modes without a ROOT installation or GPU.
+cat >"${build_dir}/bin/root" <<'EOF'
+#!/usr/bin/env bash
+[[ ! -f "$(dirname "$0")/reject-smoke" ]] || exit 1
+[[ ! -f "$(dirname "$0")/no-smoke-marker" ]] || exit 0
+case "$*" in
+  *cbmroot_xpu_smoke.C*) echo 'PASS cbmroot-xpu-runtime' ;;
+  *) exit 2 ;;
+esac
+EOF
+cat >"${build_dir}/bin/KFParticleCpuGpuV0Equivalence" <<'EOF'
+#!/usr/bin/env bash
+[[ "$1" == hip1 && "$XPU_DEVICE" == hip1 ]] || exit 2
+[[ ! -f "$(dirname "$0")/reject" ]] || exit 1
+[[ ! -f "$(dirname "$0")/no-marker" ]] || exit 0
+echo 'PASS cbmroot-cpu-gpu-v0-equivalence'
+EOF
+chmod +x "${build_dir}/bin/KFParticleCpuGpuV0Equivalence"
+regression_env=(
+  KFPARTICLE_CBMROOT_BUILD_DIR="$build_dir"
+  KFPARTICLE_CBMROOT_DEVICE=hip1
+  KFPARTICLE_CBMROOT_EQUIVALENCE_SKIP_BUILD=1
+  KFPARTICLE_CBMROOT_SMOKE_LOG_DIR="$tmp_dir/regression"
+  ROOTSYS="$build_dir"
+)
+for mode in runtime equivalence all; do
+  env "${regression_env[@]}" bash "$script_dir/run_cbmroot_regression.sh" "$mode" \
+    >"$tmp_dir/regression-$mode.log" 2>&1
+done
+[[ "$(grep -c '^PASS cbmroot-' "$tmp_dir/regression-all.log")" == 3 ]]
+evidence="$tmp_dir/regression/cbmroot-cpu-gpu-v0-equivalence-hip1.evidence.txt"
+grep -q '^build_skipped=1$' "$evidence"
+for failure in reject-smoke no-smoke-marker; do
+  touch "$build_dir/bin/$failure"
+  if env "${regression_env[@]}" bash "$script_dir/run_cbmroot_regression.sh" all \
+      >"$tmp_dir/regression-$failure.log" 2>&1; then
+    echo "FAIL regression accepted $failure" >&2; exit 1
+  fi
+  [[ ! -e "$evidence" ]]
+  ! grep -q '^PASS cbmroot-cpu-gpu-v0-equivalence' "$tmp_dir/regression-$failure.log"
+  rm "$build_dir/bin/$failure"
+done
+for failure in reject no-marker; do
+  touch "$build_dir/bin/$failure"
+  if env "${regression_env[@]}" bash "$script_dir/run_cbmroot_regression.sh" equivalence \
+      >"$tmp_dir/regression-$failure.log" 2>&1; then
+    echo "FAIL regression accepted $failure" >&2; exit 1
+  fi
+  [[ ! -e "$evidence" ]]
+  rm "$build_dir/bin/$failure"
+done
+if env "${regression_env[@]}" bash "$script_dir/run_cbmroot_regression.sh" unknown \
+    >"$tmp_dir/regression-unknown.log" 2>&1; then
+  echo "FAIL regression accepted unknown mode" >&2; exit 1
+fi
+printf 'CMAKE_HOME_DIRECTORY:INTERNAL=%s\n' "$source_dir" >>"$build_dir/CMakeCache.txt"
+if env "${regression_env[@]}" bash "$script_dir/run_cbmroot_regression.sh" runtime \
+    >"$tmp_dir/regression-mismatch.log" 2>&1; then
+  echo "FAIL regression accepted wrong source tree" >&2; exit 1
+fi
+grep -q 'build/source mismatch' "$tmp_dir/regression-mismatch.log"
+
+echo "PASS cbmroot-kfp-preflight-contract - online/offline policies and regression modes, failure propagation, evidence and source identity"

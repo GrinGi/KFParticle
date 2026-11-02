@@ -4,6 +4,7 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${script_dir}/cbmroot_kfp_preflight_common.sh"
 kfp_preflight_initialize "offline"
+kfp_preflight_options
 
 root_bin="${KFPARTICLE_CBMROOT_OFFLINE_ROOT:-${ROOTSYS:+${ROOTSYS}/bin/root}}"
 root_bin="${root_bin:-$(command -v root || true)}"
@@ -17,12 +18,7 @@ enable_mc_qa="${KFPARTICLE_CBMROOT_OFFLINE_ENABLE_MC_QA:-0}"
 backend="${KFPARTICLE_CBMROOT_OFFLINE_TRACKING_BACKEND:-gpu-multi}"
 input_kind="${KFPARTICLE_CBMROOT_OFFLINE_INPUT_KIND:-auto}"
 kfp_config="${KFPARTICLE_CBMROOT_OFFLINE_CONFIG:-${KFPARTICLE_CBMROOT_ONLINE_CONFIG:-}}"
-kfp_mode="${KFPARTICLE_CBMROOT_KFP_MODE:-cpu-only}"
-diagnostic_sample_period="${KFPARTICLE_CBMROOT_DIAGNOSTIC_SAMPLE_PERIOD:-1}"
 repeat="${KFPARTICLE_CBMROOT_OFFLINE_REPEAT:-1}"
-execute="${KFPARTICLE_CBMROOT_PREFLIGHT_EXECUTE:-0}"
-performance_monitoring="${KFPARTICLE_GPU_PERFORMANCE_MONITORING:-0}"
-qualification_expectation="${KFPARTICLE_CBMROOT_QUALIFICATION_EXPECTATION:-locked}"
 
 if [[ -z "${root_bin}" ]]; then
   kfp_preflight_fail "${KFP_PREFLIGHT_LABEL}" "ROOT executable was not found after loading the CBMRoot environment"
@@ -58,41 +54,20 @@ if ! grep -q '^[[:space:]]*doRefitTracks:' "${kfp_config}"; then
   kfp_preflight_fail "${KFP_PREFLIGHT_LABEL}" \
     "kfp.selector must define doRefitTracks: ${kfp_config}"
 fi
-case "${kfp_mode}" in
-  cpu|cpu-only) kfp_mode="cpu-only" ;;
-  diagnostic) ;;
-  qualified|qualified-gpu|validated|validated-gpu) kfp_mode="qualified-gpu" ;;
-  *) kfp_preflight_fail "${KFP_PREFLIGHT_LABEL}" \
-       "offline KFP mode must be cpu-only, diagnostic, or qualified-gpu" ;;
-esac
+kfp_preflight_validate_options "${KFP_PREFLIGHT_LIBRARY_DIR}/libAlgoOffline.so"
+
 if [[ "${kfp_mode}" == "diagnostic" ]] \
-   && ! grep -a -q 'diagnostic_contract=' "${KFP_PREFLIGHT_LIBRARY_DIR}/libCbmRecoTasks.so"; then
+   && { ! grep -a -q 'diagnostic_contract=' "${KFP_PREFLIGHT_LIBRARY_DIR}/libCbmRecoTasks.so" \
+        || ! grep -a -q 'batch_limit=' "${KFP_PREFLIGHT_LIBRARY_DIR}/libCbmRecoTasks.so"; }; then
   kfp_preflight_fail "${KFP_PREFLIGHT_LABEL}" \
     "libCbmRecoTasks.so predates diagnostic contract 2; rebuild CbmRecoTasks from the current source tree"
 fi
 if [[ "${kfp_mode}" == "qualified-gpu" ]] \
-   && ! grep -a -q 'qualification locked' "${KFP_PREFLIGHT_LIBRARY_DIR}/libCbmRecoTasks.so"; then
+   && { ! grep -a -q 'qualification locked' "${KFP_PREFLIGHT_LIBRARY_DIR}/libCbmRecoTasks.so" \
+        || ! grep -a -q 'adaptive work=' "${KFP_PREFLIGHT_LIBRARY_DIR}/libCbmRecoTasks.so"; }; then
   kfp_preflight_fail "${KFP_PREFLIGHT_LABEL}" \
-    "libCbmRecoTasks.so predates the Stage 20.2 qualification lock; rebuild CbmRecoTasks from the current source tree"
+    "libCbmRecoTasks.so predates qualified offline batching or its adaptive-policy handoff; rebuild CbmRecoTasks from the current source tree"
 fi
-if [[ ! "${diagnostic_sample_period}" =~ ^[1-9][0-9]*$ ]]; then
-  kfp_preflight_fail "${KFP_PREFLIGHT_LABEL}" \
-    "KFPARTICLE_CBMROOT_DIAGNOSTIC_SAMPLE_PERIOD must be positive"
-fi
-if [[ "${performance_monitoring}" != "0" && "${performance_monitoring}" != "1" ]]; then
-  kfp_preflight_fail "${KFP_PREFLIGHT_LABEL}" "KFPARTICLE_GPU_PERFORMANCE_MONITORING must be 0 or 1"
-fi
-case "${qualification_expectation}" in locked|published) ;; *)
-  kfp_preflight_fail "${KFP_PREFLIGHT_LABEL}" \
-    "KFPARTICLE_CBMROOT_QUALIFICATION_EXPECTATION must be locked or published"
-esac
-if [[ "${qualification_expectation}" == "published" \
-      && ("${kfp_mode}" != "qualified-gpu" || "${performance_monitoring}" != "1") ]]; then
-  kfp_preflight_fail "${KFP_PREFLIGHT_LABEL}" \
-    "published qualification expectation requires qualified-gpu mode and performance monitoring"
-fi
-kfp_preflight_check_qualification_build \
-  "${KFP_PREFLIGHT_LIBRARY_DIR}/libAlgoOffline.so" "${qualification_expectation}"
 if [[ ! "${repeat}" =~ ^[1-9][0-9]*$ ]]; then
   kfp_preflight_fail "${KFP_PREFLIGHT_LABEL}" \
     "KFPARTICLE_CBMROOT_OFFLINE_REPEAT must be positive"
@@ -179,7 +154,7 @@ kfp_preflight_check_linked_xpu "${root_bin}"
 
 mc_qa_arg="$([[ "${enable_mc_qa}" == "1" ]] && echo kTRUE || echo kFALSE)"
 event_based_arg="$([[ "${input_kind}" == "event-based" ]] && echo kTRUE || echo kFALSE)"
-macro_call="${macro}(\"${input_prefix}\",${num_entries},${first_entry},\"${output_prefix}\",\"${setup}\",\"${parameter_prefix}\",${mc_qa_arg},\"${kfp_config}\",\"${kfp_mode}\",${event_based_arg},${diagnostic_sample_period})"
+macro_call="${macro}(\"${input_prefix}\",${num_entries},${first_entry},\"${output_prefix}\",\"${setup}\",\"${parameter_prefix}\",${mc_qa_arg},\"${kfp_config}\",\"${kfp_mode}\",${event_based_arg},${diagnostic_sample_period},${diagnostic_batch_events},${materialization_threads},${adaptive_minimum_work},${adaptive_target_work},${adaptive_maximum_bytes},${packing_threads})"
 command=("${root_bin}" -l -b -q "${macro_call}")
 kfp_preflight_quote_command "${command[@]}"
 
@@ -188,7 +163,7 @@ KFP_PREFLIGHT_INPUT_KIND="${input_kind}"
 KFP_PREFLIGHT_CONFIGURATION_IDENTITY="$(kfp_preflight_path_identity "${kfp_config}"); ca=${ca_config_node}; macro=$(kfp_preflight_path_identity "${macro}"); mode=${kfp_mode}"
 KFP_PREFLIGHT_GEOMETRY_IDENTITY="${setup}"
 KFP_PREFLIGHT_PARAMETER_IDENTITY="$(kfp_preflight_path_identity "${parameter_file}")"
-KFP_PREFLIGHT_STEPS_IDENTITY="FairRunAna STS reco; CA=${backend}; events=${input_kind}; PV; RecoEvent; KfpSelectorChain=${kfp_mode}"
+KFP_PREFLIGHT_STEPS_IDENTITY="FairRunAna STS reco; CA=${backend}; events=${input_kind}; PV; RecoEvent; KfpSelectorChain=${kfp_mode}; diagnostic-batch<=${diagnostic_batch_events}; materialization-threads=${materialization_threads}; packing-threads=${packing_threads}; adaptive-work=${adaptive_minimum_work}:${adaptive_target_work}; adaptive-bytes<=${adaptive_maximum_bytes}"
 
 echo "KFParticle CBMRoot offline preflight"
 echo "  source dir : ${KFP_PREFLIGHT_SOURCE_DIR}"
@@ -207,6 +182,10 @@ echo "  KFP config : ${kfp_config}"
 echo "  CA config  : ${ca_config_node}"
 echo "  KFP mode   : ${kfp_mode}"
 echo "  KFP sample : ${diagnostic_sample_period}"
+echo "  KFP batch  : ${diagnostic_batch_events} event(s)"
+echo "  KFP materialization threads: ${materialization_threads} (0 = YAML/default)"
+echo "  KFP packing threads: ${packing_threads} (0 = YAML/default)"
+echo "  adaptive policy: minimum=${adaptive_minimum_work} target=${adaptive_target_work} max-bytes=${adaptive_maximum_bytes}"
 echo "  geometry   : ${setup}"
 echo "  parameters : ${parameter_file}"
 echo "  output     : ${output_file}"
@@ -295,18 +274,33 @@ for ((run_index = 1; run_index <= repeat; ++run_index)); do
     diagnostic_blockers="$(sed -nE 's/.* diagnostic_blockers=([0-9]+).*/\1/p' <<<"${summary}")"
 
     if [[ "${diagnostic_contract}" != "2" || -z "${processed_events}" \
-          || -z "${diagnostic_seen}" || -z "${diagnostic_ok}" \
-          || -z "${diagnostic_compared}" \
-          || -z "${diagnostic_matched}" || -z "${diagnostic_blocked}" || -z "${diagnostic_blockers}" ]] \
-       || ((diagnostic_seen == 0 || diagnostic_ok != diagnostic_seen
-            || diagnostic_compared != diagnostic_seen || diagnostic_matched != diagnostic_compared
-            || diagnostic_blocked != 0 || diagnostic_blockers != 0)) \
-       || [[ "${diagnostic_sample_period}" == "1" && "${diagnostic_seen}" != "${processed_events}" ]]; then
+          || -z "${diagnostic_seen}" || "${diagnostic_seen}" == "0" \
+          || -z "${diagnostic_ok}" || -z "${diagnostic_compared}" \
+          || -z "${diagnostic_matched}" || -z "${diagnostic_blocked}" \
+          || -z "${diagnostic_blockers}" \
+          || "${diagnostic_ok}" != "${diagnostic_seen}" \
+          || "${diagnostic_compared}" != "${diagnostic_seen}" \
+          || ("${diagnostic_sample_period}" == "1" && "${diagnostic_seen}" != "${processed_events}") ]]; then
       cat "${log_file}" >&2
+      KFP_PREFLIGHT_RESULT_IDENTITY="${summary}"
       kfp_preflight_write_evidence \
-        "diagnostic run ${run_index}/${repeat} did not report complete matching CPU/GPU results; see ${log_file}"
+        "diagnostic run ${run_index}/${repeat} did not report complete CPU/GPU results; see ${log_file}"
+      kfp_preflight_append_performance_evidence "${performance_logs[@]}"
       kfp_preflight_fail "${KFP_PREFLIGHT_LABEL}" \
-      "diagnostic run ${run_index}/${repeat} has missing, failed, or blocked CPU/GPU comparisons"
+        "diagnostic run ${run_index}/${repeat} did not complete diagnostic contract 2"
+    elif [[ "${diagnostic_matched}" != "${diagnostic_compared}" \
+            || "${diagnostic_blocked}" != "0" || "${diagnostic_blockers}" != "0" ]]; then
+      if [[ "${allow_diagnostic_rejection}" == "1" ]]; then
+        echo "  REJECTED run ${run_index}/${repeat}: diagnostic physics contract blocked; evidence retained for qualification"
+      else
+        cat "${log_file}" >&2
+        KFP_PREFLIGHT_RESULT_IDENTITY="${summary}"
+        kfp_preflight_write_evidence \
+          "diagnostic run ${run_index}/${repeat} reported blocked CPU/GPU results; see ${log_file}"
+        kfp_preflight_append_performance_evidence "${performance_logs[@]}"
+        kfp_preflight_fail "${KFP_PREFLIGHT_LABEL}" \
+          "diagnostic run ${run_index}/${repeat} did not satisfy diagnostic physics contract 2"
+      fi
     fi
   elif [[ "${kfp_mode}" == "qualified-gpu" ]]; then
     routing_line="$(grep 'KFParticle GPU routing monitoring:' "${log_file}" | tail -1 || true)"

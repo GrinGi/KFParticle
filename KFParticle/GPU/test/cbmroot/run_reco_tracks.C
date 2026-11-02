@@ -54,10 +54,21 @@
 /// \param kfpMode      disabled, cpu-only, diagnostic, or qualified-gpu
 /// \param eventBasedInput  Preserve input CbmEvent objects instead of rebuilding events
 /// \param kfpDiagnosticSamplePeriod  Process every Nth event through the GPU diagnostic path
+/// \param kfpDiagnosticBatchEvents  Maximum event domains in one GPU transaction
+/// \param kfpMaterializationThreads  Host materialization workers; zero keeps YAML/default
+/// \param kfpAdaptiveMinimumWork  Optional offline GPU crossover; zero keeps YAML/default policy
+/// \param kfpAdaptiveTargetWork  Optional offline target work; zero keeps YAML/default policy
+/// \param kfpAdaptiveMaximumBytes  Optional offline estimated allocation limit; zero keeps YAML/default policy
+/// \param kfpPackingThreads  Host input-packing workers; zero keeps YAML/default
 void run_reco_tracks(TString input, Int_t nEntries = -1, Int_t firstEntry = 0, TString output = "",
                      TString setup = "sis100_hadron", TString paramFile = "", Bool_t enableMcQa = kFALSE,
                      TString kfpConfig = "", TString kfpMode = "disabled", Bool_t eventBasedInput = kFALSE,
-                     UInt_t kfpDiagnosticSamplePeriod = 1)
+                     UInt_t kfpDiagnosticSamplePeriod = 1, UInt_t kfpDiagnosticBatchEvents = 8,
+                     UInt_t kfpMaterializationThreads = 0,
+                     ULong64_t kfpAdaptiveMinimumWork = 0u,
+                     ULong64_t kfpAdaptiveTargetWork = 0u,
+                     ULong64_t kfpAdaptiveMaximumBytes = 0u,
+                     UInt_t kfpPackingThreads = 0)
 {
   if (input.IsNull()) {
     std::cerr << "-E- run_reco_tracks: input prefix must not be empty" << std::endl;
@@ -82,6 +93,10 @@ void run_reco_tracks(TString input, Int_t nEntries = -1, Int_t firstEntry = 0, T
   }
   if (runKfp && kfpDiagnosticSamplePeriod == 0) {
     std::cerr << "-E- run_reco_tracks: KFP diagnostic sample period must be positive" << std::endl;
+    return;
+  }
+  if (runKfp && kfpDiagnosticBatchEvents == 0) {
+    std::cerr << "-E- run_reco_tracks: KFP diagnostic batch event limit must be positive" << std::endl;
     return;
   }
 
@@ -200,6 +215,13 @@ void run_reco_tracks(TString input, Int_t nEntries = -1, Int_t firstEntry = 0, T
     selector->SetConfigPath(kfpConfig.Data());
     selector->SetExecutionMode(kfpMode.Data());
     selector->SetDiagnosticSamplePeriod(kfpDiagnosticSamplePeriod);
+    selector->SetDiagnosticBatchEvents(kfpDiagnosticBatchEvents);
+    selector->SetMaterializationThreads(kfpMaterializationThreads);
+    selector->SetPackingThreads(kfpPackingThreads);
+    selector->SetAdaptiveGpuPolicy(kfpAdaptiveMinimumWork,
+                                   kfpAdaptiveTargetWork,
+                                   kfpAdaptiveMaximumBytes);
+    selector->SetFlushDiagnosticsPerEntry(!eventBasedInput);
     selector->SetUseStsPionPid(true);
     run->AddTask(selector);
   }

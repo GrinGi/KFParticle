@@ -8,18 +8,21 @@
  * (at your option) any later version.
  */
 
-#include "KFParticleGpuBufferManager.h"
-#include "KFParticleGpuCandidateTransfer.h"
-#include "KFParticleGpuDecayPlan.h"
-#include "KFParticleGpuInputDataTransfer.h"
-#include "KFParticleGpuRuntime.h"
-#include "KFParticleGpuSteering.h"
+// Controlled V0 throughput probe. Cascade/routing correctness lives in Lifecycle.
+#include "execution/KFParticleGpuRuntime.h"
+#include "execution/KFParticleGpuSteering.h"
+#include "execution/KFParticleGpuBufferManager.h"
+#include "data/KFParticleGpuInputDataTransfer.h"
+#include "planning/KFParticleGpuDecayPlan.h"
 
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
 #include <stdexcept>
+#include <string>
+#include <tuple>
 #include <vector>
 
 #ifndef KFPARTICLE_GPU_TEST_DEVICE
@@ -28,86 +31,31 @@
 
 namespace
 {
-  constexpr unsigned int CascadeBenchmarkTaskCapacity = 32u;
-  constexpr unsigned int CascadeBenchmarkSelectedCandidates = 8u;
+  void Require(bool condition, const char* message)
+  {
+    if (!condition) throw std::runtime_error(message);
+  }
 
-  struct TimingSummary {
-    double wallMilliseconds = 0.;
-    double uploadMilliseconds = 0.;
-    double constructionMilliseconds = 0.;
-    double selectionMilliseconds = 0.;
-    double cascadeConstructionMilliseconds = 0.;
-    double downloadMilliseconds = 0.;
-    unsigned int totalPairs = 0;
-    unsigned int acceptedTasks = 0;
-    unsigned int storedTasks = 0;
-    unsigned int rawCandidates = 0;
-    unsigned int selectedCandidates = 0;
-    unsigned int topologyCandidates = 0;
-    unsigned int validTopologies = 0;
-    unsigned int candidatesWithBestPrimaryVertex = 0;
-    unsigned int topologyRejected = 0;
-    unsigned int overflowFlags = 0;
-    unsigned int cascadePairs = 0;
-    unsigned int cascadeCandidates = 0;
-    unsigned int generationGroupLaunches = 0;
-    unsigned int generationDescriptorCount = 0;
-    unsigned int generationSelectionLaunches = 0;
-    unsigned int generationVisitedPairs = 0;
-    unsigned int generationActiveChannelBits = 0;
-    unsigned int generationAcceptedTasks = 0;
-    unsigned int generationStoredTasks = 0;
-    unsigned int generationBlockReservations = 0;
-    unsigned int generationDaughters = 0;
-    unsigned int generationSelectedCandidates = 0;
-    unsigned int routingGroupLaunches = 0;
-    unsigned int routingDescriptorCount = 0;
-    unsigned int routingVisitedPairs = 0;
-    unsigned int routingActiveChannelBits = 0;
-    unsigned int routingAcceptedTasks = 0;
-    unsigned int routingStoredTasks = 0;
-    unsigned int routingBlockReservations = 0;
-    unsigned int routingDaughters = 0;
-    unsigned int graphGroupLaunches = 0;
-    unsigned int graphDescriptorCount = 0;
-    unsigned int graphVisitedCombinations = 0;
-    unsigned int graphAcceptedTasks = 0;
-    unsigned int graphStoredTasks = 0;
-    unsigned int graphConstructedCandidates = 0;
-    unsigned int graphRejectedTasks = 0;
-    unsigned int graphDaughters = 0;
-    unsigned int generationPoolOverflowFlags = 0;
-    unsigned int generationRoutingOverflowFlags = 0;
-    unsigned int cascadeRoutingOverflowFlags = 0;
-    unsigned int graphOverflowFlags = 0;
-  };
-
-  struct ChannelSummary {
-    unsigned int totalPairs = 0;
-    unsigned int acceptedTasks = 0;
-    unsigned int storedTasks = 0;
-    unsigned int candidates = 0;
-    unsigned int selectedCandidates = 0;
-    unsigned int overflowFlags = 0;
-  };
-
-  struct RoutingModeTiming {
-    double wallMilliseconds = 0.;
-    KFParticleGpuV0TrackRoutingStatus status;
-    unsigned int candidates = 0u;
-    unsigned int daughters = 0u;
-  };
-
-  unsigned int ReadPositiveEnvironment(const char* name, unsigned int fallback)
+  unsigned int ReadCount(const char* name, unsigned int fallback, unsigned int maximum)
   {
     const char* value = std::getenv(name);
-    if (!value || value[0] == '\0') {
-      return fallback;
-    }
-
-    const unsigned long parsed = std::strtoul(value, nullptr, 10);
-    return parsed > 0u && parsed <= 1024u ? static_cast<unsigned int>(parsed) : fallback;
+    if (!value) return fallback;
+    const std::string text(value);
+    Require(!text.empty() && text.find_first_not_of("0123456789") == std::string::npos,
+            "benchmark counts must be positive decimal integers");
+    const auto parsed = std::stoul(text);
+    Require(parsed > 0 && parsed <= maximum, "benchmark count is out of range");
+    return static_cast<unsigned int>(parsed);
   }
+
+  // One entry per event/channel, independent of candidate-pool storage order.
+  using Result = std::tuple<unsigned int, unsigned int, unsigned int, unsigned int,
+                            unsigned int, unsigned int, unsigned int>;
+  struct Measurement {
+    double wall = 0., upload = 0., construction = 0., selection = 0., download = 0.;
+    std::vector<Result> channels;
+    KFParticleGpuPerformanceSnapshot performance;
+  };
 
   void StoreTrack(KFParticleGpuInputTrackSoAView& tracks,
                   unsigned int index,
@@ -160,115 +108,6 @@ namespace
     field.Coefficient(8) = 0.0005f;
     field.Coefficient(9) = z;
     StoreFieldRegion(field, tracks, index);
-  }
-
-  void ConfigureDefaultV0Plan(KFParticleGpuDecayPlan& plan, int transportMode, bool withCascade = false)
-  {
-    plan.Clear();
-    KFParticleGpuTwoDaughterChannel k0 = MakeK0ShortToPiPlusPiMinusChannel();
-    KFParticleGpuTwoDaughterChannel lambda = MakeLambdaToProtonPiMinusChannel();
-    KFParticleGpuTwoDaughterChannel antiLambda = MakeAntiLambdaToAntiProtonPiPlusChannel();
-    k0.transportMode = transportMode;
-    lambda.transportMode = transportMode;
-    antiLambda.transportMode = transportMode;
-    if (withCascade) {
-      const auto relax = [](KFParticleGpuTwoDaughterChannel& channel) {
-        channel.motherMassSigma = -1.f;
-        channel.secondaryMassSigmaCut = -1.f;
-        channel.maxSecondaryTopoChi2PerNdf = -1.f;
-        channel.minSecondaryLdL = -1.f;
-        channel.selection.expectedMass = 1.f;
-        channel.selection.expectedMassSigma = -1.f;
-        channel.selection.massSigmaCut = -1.f;
-        channel.selection.maxGeometricChi2PerNdf = -1.f;
-        channel.selection.maxPrimaryVertexDistance = -1.f;
-        channel.selection.minSecondaryLdL = -1.f;
-        channel.selection.maxPrimaryTopologyChi2PerNdf = -1.f;
-        channel.selection.maxSecondaryTopologyChi2PerNdf = -1.f;
-        channel.selection.requirePrimaryVertex = 0u;
-      };
-      relax(k0); relax(lambda); relax(antiLambda);
-    }
-    plan.AddTwoDaughterChannel(k0);
-    plan.AddTwoDaughterChannel(lambda);
-    plan.AddTwoDaughterChannel(antiLambda);
-    if (withCascade) {
-      AddDefaultV0TrackCascadeChannels(plan);
-
-      KFParticleGpuGraphOperationChannel composite;
-      composite.node.channelId = KFGpuChannelCompositeCompositeProbe;
-      composite.node.topology = KFGpuGraphTopologyCompositeComposite;
-      composite.node.generation = 2u;
-      composite.node.firstSource = {
-        KFGpuGraphSourceCandidateGeneration, 1u,
-        KFGpuChannelLambdaToProtonPiMinus};
-      composite.node.secondSource = {
-        KFGpuGraphSourceCandidateGeneration, 1u,
-        KFGpuChannelK0ShortToPiPlusPiMinus};
-      composite.descriptor.channelId = composite.node.channelId;
-      composite.descriptor.topology = composite.node.topology;
-      composite.descriptor.operationMask = KFGpuGraphConstruct;
-      composite.descriptor.outputClass = KFGpuGraphOutputSecondary;
-      composite.descriptor.motherPdg = 9000026;
-      composite.descriptor.firstPdg = 3122;
-      composite.descriptor.secondPdg = 310;
-      plan.AddGraphOperationChannel(composite);
-
-      KFParticleGpuGraphOperationChannel finalState;
-      finalState.node.channelId = KFGpuChannelUnaryFinalProbe;
-      finalState.node.topology = KFGpuGraphTopologyUnaryComposite;
-      finalState.node.generation = 3u;
-      finalState.node.firstSource = {
-        KFGpuGraphSourceCandidateGeneration, 2u,
-        KFGpuChannelCompositeCompositeProbe};
-      finalState.descriptor.channelId = finalState.node.channelId;
-      finalState.descriptor.topology = finalState.node.topology;
-      finalState.descriptor.operationMask = KFGpuGraphSelect;
-      finalState.descriptor.outputClass = KFGpuGraphOutputFinal;
-      finalState.descriptor.motherPdg = 9000028;
-      finalState.descriptor.firstPdg = 9000026;
-      plan.AddGraphOperationChannel(finalState);
-    }
-  }
-
-  void FillCascadeEvents(KFParticleGpuBufferManager& buffers, unsigned int eventCount)
-  {
-    KFParticleGpuBufferCapacities capacities;
-    capacities.tracks = 6u * eventCount;
-    capacities.events = eventCount;
-    capacities.candidates = 64u * eventCount;
-    capacities.daughterIds = 256u * eventCount;
-    // The relaxed fixture selects eight V0 candidates. The former six-entry
-    // compact pool silently truncated two valid entries and raised
-    // KFGpuSelectedCandidateCapacityExceeded, whose numeric bit was then
-    // mistaken for graph overflow. Match the selected pool to the candidate
-    // pool so selection, cascade routing, and monitoring see the full workload.
-    capacities.selectedCandidates = capacities.candidates;
-    capacities.twoDaughterTasks = CascadeBenchmarkTaskCapacity * eventCount;
-    capacities.v0TrackTasks = CascadeBenchmarkTaskCapacity * eventCount;
-    capacities.nonhomogeneousField = true;
-    buffers.EnsureCapacity(capacities);
-    buffers.SetInputSizes(capacities.tracks, 0u, eventCount);
-    KFParticleGpuInputTrackSoAView tracks = buffers.HostInputTracks();
-    KFParticleGpuEventDesc* events = buffers.HostEvents();
-    for (unsigned int event = 0u; event < eventCount; ++event) {
-      const unsigned int offset = 6u * event;
-      const int source = 20000 + static_cast<int>(10u * event);
-      StoreTrack(tracks, offset, -0.2f, 0.1f, 0.f, 0.8f, 0.1f, 1.f, 211, 1, source + 1);
-      StoreTrack(tracks, offset + 1u, 0.4f, -0.3f, 0.2f, 0.5f, 0.6f, 0.9f, 2212, 1, source + 2);
-      StoreTrack(tracks, offset + 2u, 0.1f, 0.5f, -0.4f, -0.3f, 0.7f, 1.1f, -211, -1, source + 3);
-      StoreTrack(tracks, offset + 3u, -0.6f, -0.2f, 0.3f, -0.4f, 0.2f, 0.8f, -211, -1, source + 4);
-      StoreTrack(tracks, offset + 4u, 0.3f, 0.1f, 0.1f, -0.1f, 0.5f, 0.7f, -211, -1, source + 5);
-      StoreTrack(tracks, offset + 5u, -0.1f, 0.2f, -0.2f, 0.2f, 0.3f, 0.9f, -321, -1, source + 6);
-      events[event] = KFParticleGpuEventDesc();
-      events[event].eventId = 9500u + event;
-      events[event].TrackSet(SecondaryPositiveFirst).tracks = KFParticleGpuRange(offset, 2u);
-      events[event].TrackSet(SecondaryPositiveFirst).Species(Pion) = KFParticleGpuRange(offset, 1u);
-      events[event].TrackSet(SecondaryPositiveFirst).Species(Proton) = KFParticleGpuRange(offset + 1u, 1u);
-      events[event].TrackSet(SecondaryNegativeFirst).tracks = KFParticleGpuRange(offset + 2u, 4u);
-      events[event].TrackSet(SecondaryNegativeFirst).Species(Pion) = KFParticleGpuRange(offset + 2u, 3u);
-      events[event].TrackSet(SecondaryNegativeFirst).Species(Kaon) = KFParticleGpuRange(offset + 5u, 1u);
-    }
   }
 
   void FillDefaultV0Events(KFParticleGpuBufferManager& buffers, unsigned int eventCount)
@@ -324,679 +163,135 @@ namespace
     }
   }
 
-  ChannelSummary Summarize(const KFParticleGpuTwoDaughterChannelResult& result,
-                           const KFParticleGpuSelectedChannelRange& selected)
+  std::vector<Result> CheckOutput(KFParticleGpuSteering& steering)
   {
-    ChannelSummary summary;
-    summary.totalPairs = result.totalPairs;
-    summary.acceptedTasks = result.acceptedTasks;
-    summary.storedTasks = result.storedTasks;
-    summary.candidates = result.constructedCandidates;
-    summary.selectedCandidates = selected.candidates.size;
-    summary.overflowFlags =
-      result.generationCandidates.overflowFlags | selected.candidates.overflowFlags;
-    return summary;
-  }
-
-  void AddTiming(TimingSummary& summary, const KFParticleGpuDecayPlanTiming& timing)
-  {
-    summary.uploadMilliseconds += timing.inputUploadMilliseconds;
-    summary.constructionMilliseconds += timing.constructionMilliseconds;
-    summary.selectionMilliseconds += timing.selectionMilliseconds;
-    summary.cascadeConstructionMilliseconds += timing.cascadeConstructionMilliseconds;
-    summary.downloadMilliseconds += timing.outputDownloadMilliseconds;
-  }
-
-  void AddRouting(TimingSummary& summary,
-                  const KFParticleGpuV0TrackRoutingMonitorData& routing)
-  {
-    summary.routingGroupLaunches += routing.groupLaunches;
-    if (routing.descriptorCount > summary.routingDescriptorCount) {
-      summary.routingDescriptorCount = routing.descriptorCount;
+    const auto& channels = steering.LastDecayPlanResults();
+    const auto& selected = steering.LastDecayPlanSelectedChannels();
+    Require(channels.size() == selected.size(), "channel/selection count mismatch");
+    std::vector<Result> result;
+    for (std::size_t i = 0; i < channels.size(); ++i) {
+      const auto& c = channels[i];
+      Require(!c.Truncated() && selected[i].candidates.overflowFlags == 0u,
+              "benchmark output overflowed");
+      result.emplace_back(c.eventIndex, c.channelId, c.totalPairs, c.acceptedTasks,
+                          c.storedTasks, c.constructedCandidates, selected[i].candidates.size);
     }
-    summary.routingVisitedPairs += routing.visitedPairs;
-    summary.routingActiveChannelBits += routing.activeChannelBits;
-    summary.routingAcceptedTasks += routing.acceptedTasks;
-    summary.routingStoredTasks += routing.storedTasks;
-    summary.routingBlockReservations += routing.blockReservations;
-    summary.routingDaughters += routing.daughters;
-    summary.cascadeRoutingOverflowFlags |= routing.overflowFlags;
-    summary.overflowFlags |= routing.overflowFlags;
-  }
-
-  void AddGenerationRouting(
-    TimingSummary& summary,
-    const KFParticleGpuTwoDaughterRoutingMonitorData& routing)
-  {
-    summary.generationGroupLaunches += routing.groupLaunches;
-    if (routing.descriptorCount > summary.generationDescriptorCount) {
-      summary.generationDescriptorCount = routing.descriptorCount;
+    auto& buffers = steering.GetBuffers();
+    const auto candidates = MakeConstView(buffers.HostCandidates());
+    const auto topology = MakeConstView(buffers.HostV0SelectionResults());
+    Require(candidates.Size() > 0u && candidates.OverflowFlags() == 0u,
+            "benchmark produced empty or overflowing candidates");
+    for (unsigned int i = 0; i < candidates.Size(); ++i) {
+      Require(topology.CanStore(i), "candidate lacks topology storage");
+      const auto& t = topology.Result(i);
+      Require((t.topologyStatus & KFGpuV0LineTopologyValid) && t.bestPrimaryVertexIndex >= 0,
+              "benchmark candidate lacks valid primary-vertex topology");
     }
-    summary.generationSelectionLaunches += routing.selectionLaunches;
-    summary.generationVisitedPairs += routing.visitedPairs;
-    summary.generationActiveChannelBits += routing.activeChannelBits;
-    summary.generationAcceptedTasks += routing.acceptedTasks;
-    summary.generationStoredTasks += routing.storedTasks;
-    summary.generationBlockReservations += routing.blockReservations;
-    summary.generationDaughters += routing.daughters;
-    summary.generationSelectedCandidates += routing.selectedCandidates;
-    summary.generationRoutingOverflowFlags |= routing.overflowFlags;
-    summary.overflowFlags |= routing.overflowFlags;
+    const auto& routing = steering.LastTwoDaughterRoutingMonitorData();
+    Require(routing.overflowFlags == 0u && routing.acceptedTasks == routing.storedTasks,
+            "benchmark routing lost accepted work");
+    return result;
   }
 
-  void AddGraphExecution(
-    TimingSummary& summary,
-    const KFParticleGpuGraphExecutionMonitorData& graph)
+  Measurement Measure(KFParticleGpuSteering& steering, unsigned int events,
+                      unsigned int iterations, unsigned int warmup, bool batch)
   {
-    summary.graphGroupLaunches += graph.groupLaunches;
-    if (graph.descriptorCount > summary.graphDescriptorCount) {
-      summary.graphDescriptorCount = graph.descriptorCount;
-    }
-    summary.graphVisitedCombinations += graph.visitedCombinations;
-    summary.graphAcceptedTasks += graph.acceptedTasks;
-    summary.graphStoredTasks += graph.storedTasks;
-    summary.graphConstructedCandidates += graph.constructedCandidates;
-    summary.graphRejectedTasks += graph.rejectedTasks;
-    summary.graphDaughters += graph.daughters;
-    summary.graphOverflowFlags |= graph.overflowFlags;
-    summary.overflowFlags |= graph.overflowFlags;
-  }
-
-  void AddWorkload(TimingSummary& timing, const ChannelSummary& channel)
-  {
-    timing.totalPairs += channel.totalPairs;
-    timing.acceptedTasks += channel.acceptedTasks;
-    timing.storedTasks += channel.storedTasks;
-    timing.rawCandidates += channel.candidates;
-    timing.selectedCandidates += channel.selectedCandidates;
-    timing.generationPoolOverflowFlags |= channel.overflowFlags;
-    timing.overflowFlags |= channel.overflowFlags;
-  }
-
-  void AddTopology(TimingSummary& timing,
-                   KFParticleGpuBufferManager& buffers)
-  {
-    const KFParticleGpuConstV0SelectionResultView selection =
-      MakeConstView(buffers.HostV0SelectionResults());
-    const KFParticleGpuConstCandidatePoolView candidates =
-      MakeConstView(buffers.HostCandidates());
-    for (unsigned int index = 0u; index < candidates.Size(); ++index) {
-      if (!selection.CanStore(index)
-          || candidates.Metadata().DaughterCount(index) != 2u) {
-        continue;
-      }
-      const KFParticleGpuV0SelectionResult& result = selection.Result(index);
-      ++timing.topologyCandidates;
-      if ((result.topologyStatus & KFGpuV0LineTopologyValid) != 0u) {
-        ++timing.validTopologies;
-      }
-      if (result.bestPrimaryVertexIndex >= 0) {
-        ++timing.candidatesWithBestPrimaryVertex;
-      }
-      if ((result.rejectionReasons & KFGpuV0SelectionRejectTopology) != 0u) {
-        ++timing.topologyRejected;
-      }
-    }
-  }
-
-  TimingSummary RunSerial(KFParticleGpuSteering& steering,
-                          KFParticleGpuBufferManager& buffers,
-                          unsigned int eventCount,
-                          unsigned int iterations,
-                          std::vector<ChannelSummary>& result,
-                          bool cascade = false)
-  {
-    TimingSummary timing;
-    result.clear();
-    const auto started = std::chrono::steady_clock::now();
-    for (unsigned int iteration = 0u; iteration < iterations; ++iteration) {
-      if (cascade) { FillCascadeEvents(buffers, eventCount); }
-      else { FillDefaultV0Events(buffers, eventCount); }
-      for (unsigned int event = 0u; event < eventCount; ++event) {
-        const std::vector<KFParticleGpuTwoDaughterChannelResult>& channels =
-          steering.RunDecayPlan(
-            event, cascade ? CascadeBenchmarkTaskCapacity : 1u);
-        if (iteration + 1u == iterations) {
-          const std::vector<KFParticleGpuSelectedChannelRange>& selected =
-            steering.LastDecayPlanSelectedChannels();
-          if (channels.size() != selected.size()) {
-            throw std::runtime_error("serial default-V0 selection/channel result size mismatch");
-          }
-          for (std::size_t channelIndex = 0u; channelIndex < channels.size(); ++channelIndex) {
-            const ChannelSummary summary = Summarize(channels[channelIndex], selected[channelIndex]);
-            result.push_back(summary);
-            AddWorkload(timing, summary);
-          }
-          AddTopology(timing, buffers);
-          AddGenerationRouting(
-            timing, steering.LastTwoDaughterRoutingMonitorData());
-          if (cascade) {
-            for (const auto& channel : steering.LastV0TrackCascadeResults()) {
-              ChannelSummary summary;
-              summary.totalPairs = channel.totalPairs;
-              summary.acceptedTasks = channel.acceptedTasks;
-              summary.storedTasks = channel.storedTasks;
-              summary.candidates = channel.constructedCandidates;
-              summary.overflowFlags = channel.generationCandidates.overflowFlags;
-              result.push_back(summary);
-              timing.cascadePairs += summary.totalPairs;
-              timing.cascadeCandidates += summary.candidates;
-              timing.overflowFlags |= summary.overflowFlags;
-            }
-            AddRouting(timing, steering.LastV0TrackRoutingMonitorData());
-            AddGraphExecution(
-              timing, steering.LastGraphExecutionMonitorData());
-          }
+    Measurement result;
+    std::vector<Result> expected;
+    // Each mode warms its own execution path. Repack/upload on every iteration;
+    // reuse capacity, not previously reconstructed output.
+    for (unsigned int iteration = 0; iteration < warmup + iterations; ++iteration) {
+      const bool measured = iteration >= warmup;
+      const auto start = std::chrono::steady_clock::now();
+      FillDefaultV0Events(steering.GetBuffers(), events);
+      std::vector<Result> actual;
+      for (unsigned int event = 0; event < events; event += batch ? events : 1u) {
+        if (batch) steering.RunDecayPlanBatch(0u, events, 1u);
+        else steering.RunDecayPlan(event, 1u);
+        const auto& timing = steering.LastDecayPlanTiming();
+        if (measured) {
+          result.upload += timing.inputUploadMilliseconds;
+          result.construction += timing.constructionMilliseconds;
+          result.selection += timing.selectionMilliseconds;
+          result.download += timing.outputDownloadMilliseconds;
         }
-        AddTiming(timing, steering.LastDecayPlanTiming());
+        const auto channels = CheckOutput(steering);
+        actual.insert(actual.end(), channels.begin(), channels.end());
       }
+      const double elapsed = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - start).count();
+      Require(actual.size() == 3u * events, "benchmark did not process all event/channel combinations");
+      if (iteration == 0u) expected = actual;
+      Require(actual == expected, "benchmark output changed between repetitions");
+      if (measured) result.wall += elapsed;
     }
-    timing.wallMilliseconds = std::chrono::duration<double, std::milli>(
-      std::chrono::steady_clock::now() - started).count();
-    return timing;
+    const double n = iterations;
+    result.wall /= n;
+    result.upload /= n;
+    result.construction /= n;
+    result.selection /= n;
+    result.download /= n;
+    result.channels = std::move(expected);
+    result.performance = steering.LastPerformanceSnapshot();
+    return result;
   }
 
-  TimingSummary RunBatch(KFParticleGpuSteering& steering,
-                         KFParticleGpuBufferManager& buffers,
-                         unsigned int eventCount,
-                         unsigned int iterations,
-                         std::vector<ChannelSummary>& result,
-                         bool cascade = false)
+  void Print(const char* mode, const Measurement& result, unsigned int events)
   {
-    TimingSummary timing;
-    result.clear();
-    const auto started = std::chrono::steady_clock::now();
-    for (unsigned int iteration = 0u; iteration < iterations; ++iteration) {
-      if (cascade) { FillCascadeEvents(buffers, eventCount); }
-      else { FillDefaultV0Events(buffers, eventCount); }
-      const std::vector<KFParticleGpuTwoDaughterChannelResult>& channels =
-        steering.RunDecayPlanBatch(
-          0u, eventCount, cascade ? CascadeBenchmarkTaskCapacity : 1u);
-      if (iteration + 1u == iterations) {
-        const std::vector<KFParticleGpuSelectedChannelRange>& selected =
-          steering.LastDecayPlanSelectedChannels();
-        if (channels.size() != selected.size()) {
-          throw std::runtime_error("batch default-V0 selection/channel result size mismatch");
-        }
-        for (std::size_t channelIndex = 0u; channelIndex < channels.size(); ++channelIndex) {
-          const ChannelSummary summary = Summarize(channels[channelIndex], selected[channelIndex]);
-          result.push_back(summary);
-          AddWorkload(timing, summary);
-        }
-        AddTopology(timing, buffers);
-        AddGenerationRouting(
-          timing, steering.LastTwoDaughterRoutingMonitorData());
-        if (cascade) {
-          for (const auto& channel : steering.LastV0TrackCascadeResults()) {
-            ChannelSummary summary;
-            summary.totalPairs = channel.totalPairs;
-            summary.acceptedTasks = channel.acceptedTasks;
-            summary.storedTasks = channel.storedTasks;
-            summary.candidates = channel.constructedCandidates;
-            summary.overflowFlags = channel.generationCandidates.overflowFlags;
-            result.push_back(summary);
-            timing.cascadePairs += summary.totalPairs;
-            timing.cascadeCandidates += summary.candidates;
-            timing.overflowFlags |= summary.overflowFlags;
-          }
-          AddRouting(timing, steering.LastV0TrackRoutingMonitorData());
-          AddGraphExecution(
-            timing, steering.LastGraphExecutionMonitorData());
-        }
-      }
-      AddTiming(timing, steering.LastDecayPlanTiming());
+    unsigned long long pairs = 0, raw = 0, selected = 0;
+    for (const auto& c : result.channels) {
+      pairs += std::get<2>(c);
+      raw += std::get<5>(c);
+      selected += std::get<6>(c);
     }
-    timing.wallMilliseconds = std::chrono::duration<double, std::milli>(
-      std::chrono::steady_clock::now() - started).count();
-    return timing;
-  }
-
-  bool SameResults(const std::vector<ChannelSummary>& serial,
-                   const std::vector<ChannelSummary>& batch)
-  {
-    if (serial.size() != batch.size()) {
-      return false;
-    }
-    for (std::size_t index = 0u; index < serial.size(); ++index) {
-      const ChannelSummary& first = serial[index];
-      const ChannelSummary& second = batch[index];
-      if (first.totalPairs != second.totalPairs || first.acceptedTasks != second.acceptedTasks
-          || first.storedTasks != second.storedTasks || first.candidates != second.candidates
-          || first.selectedCandidates != second.selectedCandidates
-          || first.overflowFlags != second.overflowFlags) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  bool SameWorkload(const std::vector<ChannelSummary>& first,
-                    const std::vector<ChannelSummary>& second)
-  {
-    const auto sum = [](const std::vector<ChannelSummary>& channels) {
-      ChannelSummary total;
-      for (const auto& channel : channels) {
-        total.totalPairs += channel.totalPairs;
-        total.acceptedTasks += channel.acceptedTasks;
-        total.storedTasks += channel.storedTasks;
-        total.candidates += channel.candidates;
-        total.selectedCandidates += channel.selectedCandidates;
-        total.overflowFlags |= channel.overflowFlags;
-      }
-      return total;
-    };
-    const ChannelSummary lhs = sum(first);
-    const ChannelSummary rhs = sum(second);
-    return lhs.totalPairs == rhs.totalPairs && lhs.acceptedTasks == rhs.acceptedTasks
-           && lhs.storedTasks == rhs.storedTasks && lhs.candidates == rhs.candidates
-           && lhs.selectedCandidates == rhs.selectedCandidates
-           && lhs.overflowFlags == rhs.overflowFlags;
-  }
-
-  RoutingModeTiming RunRoutingModeBenchmark(
-    KFParticleGpuSteering& steering,
-    KFParticleGpuBufferManager& buffers,
-    unsigned int iterations,
-    KFParticleGpuV0TrackRoutingMode mode)
-  {
-    FillCascadeEvents(buffers, 1u);
-    steering.RunDecayPlan(0u, CascadeBenchmarkTaskCapacity);
-    const std::vector<KFParticleGpuDecayPlanEventResult>& events =
-      steering.LastDecayPlanEventResults();
-    if (events.size() != 1u || events[0].candidates.Empty()
-        || events[0].selectedCandidates.size
-             != CascadeBenchmarkSelectedCandidates
-        || events[0].selectedCandidates.overflowFlags != 0u) {
-      std::cerr << "ROUTING_PREP_ERROR"
-                << " events=" << events.size();
-      if (!events.empty()) {
-        std::cerr << " candidates=" << events[0].candidates.size
-                  << " selected=" << events[0].selectedCandidates.size
-                  << " selected_overflow="
-                  << events[0].selectedCandidates.overflowFlags;
-      }
-      std::cerr << '\n';
-      throw std::runtime_error("routing benchmark could not prepare a selected V0 generation");
-    }
-    const KFParticleGpuCandidateRange rawCandidates = events[0].candidates;
-    const KFParticleGpuSelectedCandidateRange selected =
-      events[0].selectedCandidates;
-    const unsigned int routedTaskCapacity =
-      buffers.Capacities().candidates - rawCandidates.End();
-    if (routedTaskCapacity == 0u) {
-      throw std::runtime_error("routing benchmark has no candidate capacity for cascades");
-    }
-
-    RoutingModeTiming timing;
-    const auto runOnce = [&]() {
-      KFParticleGpuCandidatePoolView candidates = buffers.HostCandidates();
-      candidates.SizeData()[0] = rawCandidates.End();
-      candidates.Daughters().SizeData()[0] = rawCandidates.DaughterEnd();
-      candidates.OverflowFlagsData()[0] = 0u;
-      buffers.UploadCandidates();
-      return steering.RunV0TrackFusedStage(
-        0u, selected, routedTaskCapacity, mode);
-    };
-
-    // Load the selected XPU action and settle persistent allocations before timing.
-    runOnce();
-    const auto started = std::chrono::steady_clock::now();
-    for (unsigned int iteration = 0u; iteration < iterations; ++iteration) {
-      const KFParticleGpuV0TrackFusedResult result = runOnce();
-      timing.status = result.routing;
-      timing.candidates = result.candidates.size;
-      timing.daughters = result.candidates.daughterSize;
-    }
-    timing.wallMilliseconds = std::chrono::duration<double, std::milli>(
-      std::chrono::steady_clock::now() - started).count();
-    if (timing.status.acceptedTasks != timing.status.storedTasks
-        || timing.status.storedTasks != timing.candidates
-        || timing.daughters != 3u * timing.candidates
-        || timing.status.overflowFlags != 0u) {
-      throw std::runtime_error("routing-mode benchmark produced inconsistent output");
-    }
-    return timing;
-  }
-
-  void PrintRoutingTiming(const char* mode,
-                          const RoutingModeTiming& timing,
-                          unsigned int iterations)
-  {
-    std::cout << std::fixed << std::setprecision(3)
-              << "ROUTING_METRIC mode=" << mode
-              << " wall_ms=" << timing.wallMilliseconds
-                                / static_cast<double>(iterations)
-              << " visited_pairs=" << timing.status.visitedPairs
-              << " active_bits=" << timing.status.activeChannelBits
-              << " accepted=" << timing.status.acceptedTasks
-              << " stored=" << timing.status.storedTasks
-              << " global_reservations=" << timing.status.blockReservations
-              << " candidates=" << timing.candidates
-              << " daughters=" << timing.daughters
-              << " overflow=" << timing.status.overflowFlags << '\n';
-  }
-
-  void PrintTiming(const char* mode, const TimingSummary& timing, unsigned int iterations)
-  {
-    const double divisor = static_cast<double>(iterations);
-    std::cout << std::fixed << std::setprecision(3)
-              << "METRIC mode=" << mode
-              << " wall_ms=" << timing.wallMilliseconds / divisor
-              << " h2d_ms=" << timing.uploadMilliseconds / divisor
-              << " construction_ms=" << timing.constructionMilliseconds / divisor
-              << " topology_selection_ms=" << timing.selectionMilliseconds / divisor
-              << " cascade_construction_ms=" << timing.cascadeConstructionMilliseconds / divisor
-              << " d2h_ms=" << timing.downloadMilliseconds / divisor
-              << " pairs=" << timing.totalPairs
-              << " accepted_tasks=" << timing.acceptedTasks
-              << " stored_tasks=" << timing.storedTasks
-              << " raw=" << timing.rawCandidates
-              << " selected=" << timing.selectedCandidates
-              << " topology_candidates=" << timing.topologyCandidates
-              << " topology_valid=" << timing.validTopologies
-              << " topology_best_pv=" << timing.candidatesWithBestPrimaryVertex
-              << " topology_rejected=" << timing.topologyRejected
-              << " cascade_pairs=" << timing.cascadePairs
-              << " cascade_candidates=" << timing.cascadeCandidates
-              << " generation_groups=" << timing.generationGroupLaunches
-              << " generation_descriptors=" << timing.generationDescriptorCount
-              << " generation_selection_launches="
-              << timing.generationSelectionLaunches
-              << " generation_visited_pairs=" << timing.generationVisitedPairs
-              << " generation_active_bits=" << timing.generationActiveChannelBits
-              << " generation_accepted=" << timing.generationAcceptedTasks
-              << " generation_stored=" << timing.generationStoredTasks
-              << " generation_block_reservations="
-              << timing.generationBlockReservations
-              << " generation_daughters=" << timing.generationDaughters
-              << " generation_selected="
-              << timing.generationSelectedCandidates
-              << " routing_groups=" << timing.routingGroupLaunches
-              << " routing_descriptors=" << timing.routingDescriptorCount
-              << " routing_visited_pairs=" << timing.routingVisitedPairs
-              << " routing_active_bits=" << timing.routingActiveChannelBits
-              << " routing_accepted=" << timing.routingAcceptedTasks
-              << " routing_stored=" << timing.routingStoredTasks
-              << " routing_block_reservations=" << timing.routingBlockReservations
-              << " routing_daughters=" << timing.routingDaughters
-              << " graph_groups=" << timing.graphGroupLaunches
-              << " graph_descriptors=" << timing.graphDescriptorCount
-              << " graph_visited=" << timing.graphVisitedCombinations
-              << " graph_accepted=" << timing.graphAcceptedTasks
-              << " graph_stored=" << timing.graphStoredTasks
-              << " graph_constructed=" << timing.graphConstructedCandidates
-              << " graph_rejected=" << timing.graphRejectedTasks
-              << " graph_daughters=" << timing.graphDaughters
-              << " overflow=" << timing.overflowFlags << '\n';
-  }
-
-  void PrintPerformance(const KFParticleGpuPerformanceSnapshot& snapshot)
-  {
-    if (!snapshot.enabled) { return; }
+    Require(std::isfinite(result.wall) && result.wall > 0., "invalid benchmark wall time");
     std::cout << std::fixed << std::setprecision(6)
-              << "PERFORMANCE_METRIC mode=batch"
-              << " events=" << snapshot.events
-              << " tracks=" << snapshot.tracks
-              << " vertices=" << snapshot.vertices
-              << " descriptor_groups=" << snapshot.descriptorGroups
-              << " visited=" << snapshot.visitedCombinations
-              << " accepted=" << snapshot.acceptedTasks
-              << " stored=" << snapshot.storedTasks
-              << " rejected=" << snapshot.rejectedTasks
-              << " candidates=" << snapshot.rawCandidates
-              << " selected=" << snapshot.selectedCandidates
-              << " daughters=" << snapshot.daughters
-              << " launches=" << snapshot.kernelLaunches
-              << " queue_waits=" << snapshot.queueWaits
-              << " capacity_growths=" << snapshot.capacityGrowths
-              << " h2d_bytes=" << snapshot.hostToDeviceBytes
-              << " d2h_bytes=" << snapshot.deviceToHostBytes
-              << " allocated_high_water_bytes=" << snapshot.allocatedBytesHighWater
-              << " mask_density=" << snapshot.maskDensity
-              << " useful_work_per_launch=" << snapshot.usefulWorkPerLaunch
-              << " candidate_pool_occupancy=" << snapshot.candidatePoolOccupancy
-              << " overflow=" << snapshot.overflowFlags << '\n';
+              << "METRIC mode=" << mode << " events=" << events
+              << " wall_ms=" << result.wall << " per_event_ms=" << result.wall / events
+              << " h2d_ms=" << result.upload << " construction_ms=" << result.construction
+              << " topology_selection_ms=" << result.selection << " d2h_ms=" << result.download
+              << " pairs=" << pairs << " raw=" << raw << " selected=" << selected
+              << " overflow=0\n";
   }
 }
 
 int main()
 {
-  const unsigned int eventCount = ReadPositiveEnvironment("KFPARTICLE_GPU_BATCH_BENCHMARK_EVENTS", 4u);
-  const unsigned int iterations = ReadPositiveEnvironment("KFPARTICLE_GPU_BATCH_BENCHMARK_ITERATIONS", 10u);
-  const unsigned int warmupIterations =
-    ReadPositiveEnvironment("KFPARTICLE_GPU_BATCH_BENCHMARK_WARMUP_ITERATIONS", 3u);
-
-  KFParticleGpuRuntime& runtime = KFParticleGpuRuntime::Instance();
-  KFParticleGpuRuntimeSettings settings;
-  settings.device = KFPARTICLE_GPU_TEST_DEVICE;
-  settings.initializeXpuIfNeeded = true;
-  runtime.Initialize(settings);
-
+  auto& runtime = KFParticleGpuRuntime::Instance();
   try {
-    KFParticleGpuSteering& steering = runtime.GetSteering();
+    const auto events = ReadCount("KFPARTICLE_GPU_BATCH_BENCHMARK_EVENTS", 4u, 1024u);
+    const auto iterations = ReadCount("KFPARTICLE_GPU_BATCH_BENCHMARK_ITERATIONS", 10u, 1024u);
+    const auto warmup = ReadCount("KFPARTICLE_GPU_BATCH_BENCHMARK_WARMUP_ITERATIONS", 3u, 1024u);
+    KFParticleGpuRuntimeSettings settings;
+    settings.device = KFPARTICLE_GPU_TEST_DEVICE;
+    settings.initializeXpuIfNeeded = true;
+    runtime.Initialize(settings);
+    auto& steering = runtime.GetSteering();
     steering.SetPerformanceMonitoringEnabled(true);
-    KFParticleGpuDecayPlan& plan = steering.GetDecayPlan();
+    auto& plan = steering.GetDecayPlan();
     plan.Clear();
-    ConfigureDefaultV0Plan(plan, KFGpuTransportFullField);
-
-    KFParticleGpuBufferManager& buffers = steering.GetBuffers();
-    std::vector<ChannelSummary> serial;
-    std::vector<ChannelSummary> batch;
-
-    // Warm-up creates the XPU image and persistent allocations outside timing.
-    for (unsigned int iteration = 0u; iteration < warmupIterations; ++iteration) {
-      FillDefaultV0Events(buffers, eventCount);
-      steering.RunDecayPlanBatch(0u, eventCount, 1u);
-    }
-
-    const TimingSummary serialTiming = RunSerial(steering, buffers, eventCount, iterations, serial);
-    const TimingSummary batchTiming = RunBatch(steering, buffers, eventCount, iterations, batch);
-    const KFParticleGpuPerformanceSnapshot batchPerformance =
-      steering.LastPerformanceSnapshot();
-    if (!SameResults(serial, batch)) {
-      throw std::runtime_error("serial and batch default-V0 channel summaries differ");
-    }
-    if (serialTiming.topologyCandidates != batchTiming.topologyCandidates
-        || serialTiming.validTopologies != batchTiming.validTopologies
-        || serialTiming.candidatesWithBestPrimaryVertex != batchTiming.candidatesWithBestPrimaryVertex) {
-      throw std::runtime_error("serial and batch default-V0 topology summaries differ");
-    }
-    if (batchTiming.topologyCandidates != batchTiming.rawCandidates
-        || batchTiming.validTopologies != batchTiming.rawCandidates
-        || batchTiming.candidatesWithBestPrimaryVertex != batchTiming.rawCandidates) {
-      throw std::runtime_error("default-V0 batch did not execute valid line-topology selection for every raw candidate");
-    }
-    if (serialTiming.generationVisitedPairs != batchTiming.generationVisitedPairs
-        || serialTiming.generationActiveChannelBits
-             != batchTiming.generationActiveChannelBits
-        || serialTiming.generationAcceptedTasks
-             != batchTiming.generationAcceptedTasks
-        || serialTiming.generationStoredTasks
-             != batchTiming.generationStoredTasks
-        || serialTiming.generationSelectedCandidates
-             != batchTiming.generationSelectedCandidates) {
-      throw std::runtime_error(
-        "serial and batch default-V0 generation-routing summaries differ");
-    }
-    if (batchTiming.generationGroupLaunches == 0u
-        || batchTiming.generationDescriptorCount != 3u
-        || batchTiming.generationSelectionLaunches != eventCount
-        || batchTiming.generationAcceptedTasks
-             != batchTiming.generationStoredTasks
-        || batchTiming.generationStoredTasks != batchTiming.rawCandidates
-        || batchTiming.generationBlockReservations == 0u
-        || batchTiming.generationBlockReservations
-             > batchTiming.generationAcceptedTasks
-        || batchTiming.generationDaughters != 2u * batchTiming.rawCandidates
-        || batchTiming.generationSelectedCandidates
-             != batchTiming.selectedCandidates) {
-      throw std::runtime_error(
-        "block-scan default-V0 generation monitoring is inconsistent");
-    }
-
-    std::vector<ChannelSummary> constantByBatch;
-    std::vector<ChannelSummary> approximateFullFieldBatch;
-    ConfigureDefaultV0Plan(plan, KFGpuTransportFullFieldApprox);
-    const TimingSummary approximateFullFieldTiming =
-      RunBatch(steering, buffers, eventCount, iterations, approximateFullFieldBatch);
-    if (approximateFullFieldTiming.overflowFlags != 0u) {
-      throw std::runtime_error("approximate full-field baseline overflowed its bounded candidate pools");
-    }
-
-    ConfigureDefaultV0Plan(plan, KFGpuTransportConstantBy);
-    const TimingSummary constantByTiming =
-      RunBatch(steering, buffers, eventCount, iterations, constantByBatch);
-    if (constantByTiming.overflowFlags != 0u) {
-      throw std::runtime_error("constant-By baseline overflowed its bounded candidate pools");
-    }
-
-    ConfigureDefaultV0Plan(plan, KFGpuTransportFullField, true);
-    std::vector<ChannelSummary> cascadeSerial;
-    std::vector<ChannelSummary> cascadeBatch;
-    // The controlled cascade fixture isolates one event. Multi-event cascade
-    // batching is intentionally qualified by the dedicated lifecycle path.
-    const unsigned int cascadeEventCount = 1u;
-    const TimingSummary cascadeSerialTiming =
-      RunSerial(steering, buffers, cascadeEventCount, iterations, cascadeSerial, true);
-    const TimingSummary cascadeBatchTiming =
-      RunBatch(steering, buffers, cascadeEventCount, iterations, cascadeBatch, true);
-    if (!SameWorkload(cascadeSerial, cascadeBatch)
-        || cascadeSerialTiming.cascadePairs != cascadeBatchTiming.cascadePairs
-        || cascadeSerialTiming.cascadeCandidates != cascadeBatchTiming.cascadeCandidates
-        || cascadeSerialTiming.routingAcceptedTasks
-             != cascadeBatchTiming.routingAcceptedTasks
-        || cascadeSerialTiming.routingStoredTasks
-             != cascadeBatchTiming.routingStoredTasks
-        || cascadeSerialTiming.routingVisitedPairs
-             != cascadeBatchTiming.routingVisitedPairs
-        || cascadeSerialTiming.routingActiveChannelBits
-             != cascadeBatchTiming.routingActiveChannelBits
-        || cascadeSerialTiming.graphGroupLaunches
-             != cascadeBatchTiming.graphGroupLaunches
-        || cascadeSerialTiming.graphVisitedCombinations
-             != cascadeBatchTiming.graphVisitedCombinations
-        || cascadeSerialTiming.graphAcceptedTasks
-             != cascadeBatchTiming.graphAcceptedTasks
-        || cascadeSerialTiming.graphStoredTasks
-             != cascadeBatchTiming.graphStoredTasks
-        || cascadeSerialTiming.graphConstructedCandidates
-             != cascadeBatchTiming.graphConstructedCandidates
-        || cascadeSerialTiming.graphRejectedTasks
-             != cascadeBatchTiming.graphRejectedTasks
-        || cascadeSerialTiming.graphDaughters
-             != cascadeBatchTiming.graphDaughters) {
-      throw std::runtime_error("serial and batch V0-track cascade summaries differ");
-    }
-    if (cascadeBatchTiming.routingGroupLaunches == 0u
-        || cascadeBatchTiming.routingDescriptorCount != 4u
-        || cascadeBatchTiming.routingAcceptedTasks
-             != cascadeBatchTiming.routingStoredTasks
-        || cascadeBatchTiming.routingStoredTasks
-             != cascadeBatchTiming.cascadeCandidates
-        || cascadeBatchTiming.routingBlockReservations == 0u
-        || cascadeBatchTiming.routingBlockReservations
-             > cascadeBatchTiming.routingAcceptedTasks
-        || cascadeBatchTiming.routingDaughters
-             != 3u * cascadeBatchTiming.cascadeCandidates) {
-      std::cerr << "ROUTING_MONITOR_ERROR"
-                << " groups=" << cascadeBatchTiming.routingGroupLaunches
-                << " descriptors=" << cascadeBatchTiming.routingDescriptorCount
-                << " accepted=" << cascadeBatchTiming.routingAcceptedTasks
-                << " stored=" << cascadeBatchTiming.routingStoredTasks
-                << " reservations=" << cascadeBatchTiming.routingBlockReservations
-                << " candidates=" << cascadeBatchTiming.cascadeCandidates
-                << " daughters=" << cascadeBatchTiming.routingDaughters
-                << " overflow=" << cascadeBatchTiming.overflowFlags << '\n';
-      throw std::runtime_error("block-scan cascade routing monitoring is inconsistent");
-    }
-    if (cascadeBatchTiming.graphGroupLaunches == 0u
-        || cascadeBatchTiming.graphDescriptorCount != 2u
-        || cascadeBatchTiming.graphVisitedCombinations == 0u
-        || cascadeBatchTiming.graphStoredTasks == 0u
-        || cascadeBatchTiming.graphAcceptedTasks
-             != cascadeBatchTiming.graphStoredTasks
-        || cascadeBatchTiming.graphConstructedCandidates
-             + cascadeBatchTiming.graphRejectedTasks
-             != cascadeBatchTiming.graphStoredTasks
-        || cascadeBatchTiming.overflowFlags != 0u) {
-      const KFParticleGpuCandidatePoolView graphCandidates =
-        buffers.HostCandidates();
-      const KFParticleGpuSelectedCandidateIndexView graphSelected =
-        buffers.HostSelectedCandidates();
-      std::cerr << "GRAPH_MONITOR_ERROR"
-                << " groups=" << cascadeBatchTiming.graphGroupLaunches
-                << " descriptors=" << cascadeBatchTiming.graphDescriptorCount
-                << " visited=" << cascadeBatchTiming.graphVisitedCombinations
-                << " accepted=" << cascadeBatchTiming.graphAcceptedTasks
-                << " stored=" << cascadeBatchTiming.graphStoredTasks
-                << " constructed=" << cascadeBatchTiming.graphConstructedCandidates
-                << " rejected=" << cascadeBatchTiming.graphRejectedTasks
-                << " daughters=" << cascadeBatchTiming.graphDaughters
-                << " pool_size=" << graphCandidates.Size()
-                << " pool_capacity=" << graphCandidates.Capacity()
-                << " daughter_size=" << graphCandidates.Daughters().Size()
-                << " daughter_capacity="
-                << graphCandidates.Daughters().Capacity()
-                << " selected_size=" << graphSelected.Size()
-                << " selected_capacity=" << graphSelected.Capacity()
-                << " selected_overflow=" << graphSelected.OverflowFlags()
-                << " generation_pool_overflow="
-                << cascadeBatchTiming.generationPoolOverflowFlags
-                << " generation_routing_overflow="
-                << cascadeBatchTiming.generationRoutingOverflowFlags
-                << " cascade_routing_overflow="
-                << cascadeBatchTiming.cascadeRoutingOverflowFlags
-                << " graph_overflow="
-                << cascadeBatchTiming.graphOverflowFlags
-                << " overflow=" << cascadeBatchTiming.overflowFlags << '\n';
-      throw std::runtime_error(
-        "device graph scheduler serial/batch monitoring is inconsistent");
-    }
-    const RoutingModeTiming atomicRouting = RunRoutingModeBenchmark(
-      steering, buffers, iterations, KFGpuV0TrackRoutingAtomic);
-    const RoutingModeTiming blockScanRouting = RunRoutingModeBenchmark(
-      steering, buffers, iterations, KFGpuV0TrackRoutingBlockScan);
-    if (atomicRouting.status.visitedPairs != blockScanRouting.status.visitedPairs
-        || atomicRouting.status.activeChannelBits
-             != blockScanRouting.status.activeChannelBits
-        || atomicRouting.status.acceptedTasks
-             != blockScanRouting.status.acceptedTasks
-        || atomicRouting.status.storedTasks != blockScanRouting.status.storedTasks
-        || atomicRouting.candidates != blockScanRouting.candidates
-        || atomicRouting.daughters != blockScanRouting.daughters
-        || atomicRouting.status.blockReservations
-             != atomicRouting.status.acceptedTasks
-        || blockScanRouting.status.blockReservations == 0u
-        || blockScanRouting.status.blockReservations
-             > atomicRouting.status.blockReservations) {
-      throw std::runtime_error("atomic and block-scan routing modes disagree");
-    }
-
-    std::cout << "PASS kfparticle-gpu-batch-benchmark"
-              << " - events=" << eventCount
-              << " iterations=" << iterations
-              << " warmup_iterations=" << warmupIterations
-              << " channels=K0S,Lambda,anti-Lambda"
-              << ",Xi,anti-Xi,Omega,anti-Omega"
-              << ",composite-composite,unary-final"
-              << " transport=full-field"
-              << " serial_batch_equivalent=1\n";
-    PrintTiming("serial", serialTiming, iterations);
-    PrintTiming("batch", batchTiming, iterations);
-    PrintTiming("full-field-approx-batch", approximateFullFieldTiming, iterations);
-    PrintTiming("constant-by-batch", constantByTiming, iterations);
-    PrintTiming("cascade-serial", cascadeSerialTiming, iterations);
-    PrintTiming("cascade-batch", cascadeBatchTiming, iterations);
-    PrintPerformance(batchPerformance);
-    PrintRoutingTiming("atomic", atomicRouting, iterations);
-    PrintRoutingTiming("block-scan", blockScanRouting, iterations);
-
-    plan.Clear();
+    AddDefaultV0TwoDaughterChannels(plan);
+    const auto serial = Measure(steering, events, iterations, warmup, false);
+    const auto batch = Measure(steering, events, iterations, warmup, true);
+    Require(serial.channels == batch.channels, "serial/batch event-channel results differ");
+    Print("serial", serial, events);
+    Print("batch", batch, events);
+    const auto& p = batch.performance;
+    Require(p.enabled && p.overflowFlags == 0u, "invalid batch performance snapshot");
+    std::cout << "PERFORMANCE_METRIC mode=batch events=" << p.events << " tracks=" << p.tracks
+              << " launches=" << p.kernelLaunches << " queue_waits=" << p.queueWaits
+              << " capacity_allocation_rounds=" << p.capacityGrowths
+              << " h2d_bytes=" << p.hostToDeviceBytes << " d2h_bytes=" << p.deviceToHostBytes
+              << " allocated_high_water_bytes=" << p.allocatedBytesHighWater << '\n';
     runtime.Finalize();
+    std::cout << "PASS kfparticle-gpu-batch-benchmark events=" << events
+              << " iterations=" << iterations << " warmup_iterations=" << warmup
+              << " serial_batch_equivalent=1\n";
     return 0;
   }
-  catch (...) {
+  catch (const std::exception& error) {
+    std::cerr << "FAIL kfparticle-gpu-batch-benchmark - " << error.what() << '\n';
     runtime.Finalize();
-    throw;
+    return 1;
   }
 }

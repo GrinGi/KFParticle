@@ -12,15 +12,19 @@
 // as the CPU finder. It must not be interpreted by ROOT/Cling.
 
 #include "CbmXpu.h"
-#include "algo/kfp/gpu/KfpGpuDiagnosticComparison.h"
-#include "algo/kfp/gpu/KfpGpuDiagnosticRunner.h"
+#include "algo/kfp/gpu/KfpGpuComparison.h"
+#include "execution/KFParticleGpuExecutor.h"
+#include "execution/KFParticleGpuFinder.h"
+#include "data/KFParticleGpuInputPacker.h"
+#include "execution/KFParticleGpuRuntimeService.h"
+#include "algo/kfp/gpu/KfpGpuQualifiedBatch.h"
 #include "KFParticleFinder.h"
-#include "KFParticleGpuCpuChannelCatalogue.h"
-#include "KFParticleGpuDecayPlan.h"
-#include "KFParticleGpuKernels.h"
-#include "KFParticleGpuRuntime.h"
-#include "KFParticleGpuSteering.h"
-#include "KFParticleGpuTwoDaughter.h"
+#include "planning/KFParticleGpuCpuChannelCatalogue.h"
+#include "planning/KFParticleGpuDecayPlan.h"
+#include "execution/KFParticleGpuKernels.h"
+#include "execution/KFParticleGpuRuntime.h"
+#include "execution/KFParticleGpuSteering.h"
+#include "algorithms/KFParticleGpuTwoDaughter.h"
 #include "KFParticleTopoReconstructor.h"
 #include "KFPTrackVector.h"
 #include "KFPVertex.h"
@@ -359,43 +363,61 @@ namespace
     // Run the GPU path from the pristine fixture. The CPU finder sorts and
     // transports its working tracks with SIMD code, so it receives private
     // copies and cannot affect the input used by the independent GPU path.
-    const auto gpuResult = cbm::algo::kfp::GpuDiagnosticRunner().Run(
+    const auto gpuResult = ::kfparticle::gpu::GpuExecutor().Run(
       eventId, first, last, chiToPrimaryVertex, primaryVertices);
 
     const auto cpuParticles = RunCpuFinder(first, last, primaryVertices.front(), test.motherPdg);
     unsigned int unresolvedCpuCandidates = 0u;
-    const auto cpu = cbm::algo::kfp::GpuDiagnosticComparator::ExtractCpuV0Candidates(
+    const auto cpu = cbm::algo::kfp::GpuComparator::ExtractCpuV0Candidates(
       eventId, cpuParticles, unresolvedCpuCandidates);
 
-    auto gpu = cbm::algo::kfp::GpuDiagnosticComparator::MakeGpuCandidateSnapshots(gpuResult);
+    auto gpu = cbm::algo::kfp::GpuComparator::MakeGpuCandidateSnapshots(gpuResult);
     gpu.erase(std::remove_if(gpu.begin(),
                              gpu.end(),
                              [&test](const auto& candidate) {
                                return candidate.key.pdg != test.motherPdg;
                              }),
               gpu.end());
-    const auto comparison = cbm::algo::kfp::GpuDiagnosticComparator::Compare(
+    const auto comparison = cbm::algo::kfp::GpuComparator::Compare(
       eventId, cpu, gpu, unresolvedCpuCandidates);
 
     const std::string label = std::string(test.name) + ": ";
-    Require(gpuResult.status == cbm::algo::kfp::GpuDiagnosticStatus::Completed,
+    Require(gpuResult.status == ::kfparticle::gpu::GpuExecutionStatus::Completed,
             label + "GPU diagnostic did not complete: " + gpuResult.message);
-    unsigned int plannedPairs = 0u;
+    ::kfparticle::gpu::GpuEventInput input;
+    input.eventId = static_cast<unsigned int>(eventId);
+    input.first = &first;
+    input.last = &last;
+    input.chiToPrimaryVertex = &chiToPrimaryVertex;
+    input.primaryVertices = &primaryVertices;
+    const auto prepared = ::kfparticle::gpu::GpuInputPacker::Prepare(input);
+    KFParticleGpuDecayPlan referencePlan;
+    AddCompleteCpuFinderChannels(referencePlan);
+    const auto expectedCapacity = KFParticleGpuCpuFinderEventCapacityPlan(
+      prepared.Descriptor(), referencePlan);
+    unsigned int reportedPairs = 0u;
     unsigned int targetPairs = 0u;
     for (const auto& channel : gpuResult.channels) {
-      plannedPairs += channel.totalPairs;
+      reportedPairs += channel.totalPairs;
       if (channel.motherPdg == test.motherPdg) { targetPairs = channel.totalPairs; }
     }
     Require(gpuResult.channels.size() == 50u,
             label + "complete two-daughter plan did not report all active channels");
-    Require(plannedPairs == gpuResult.taskCapacity,
-            label + "default-plan channel pairs and task capacity disagree");
+    Require(reportedPairs == expectedCapacity.twoDaughterCandidates,
+            label + "two-daughter pair count disagrees with its reference bound: reported="
+              + std::to_string(reportedPairs) + " expected="
+              + std::to_string(expectedCapacity.twoDaughterCandidates));
+    Require(gpuResult.taskCapacity == expectedCapacity.taskCapacity,
+            label + "full-graph task workspace disagrees with its reference plan: reported="
+              + std::to_string(gpuResult.taskCapacity) + " expected="
+              + std::to_string(expectedCapacity.taskCapacity)
+              + " two_daughter_pairs=" + std::to_string(reportedPairs));
     Require(targetPairs == 1u,
             label + "target V0 channel did not receive exactly one daughter pair");
     // A pi+ pi- pair also supports the CPU-compatible proton fallback of the
     // Lambda channel, while explicit proton-pion inputs support only their
-    // target channel. The channel-derived sum above is therefore the stable
-    // contract; one hard-coded capacity cannot describe all three fixtures.
+    // target channel. Check the two-track sum against its own bound, not the
+    // larger reusable workspace needed by dependent decay generations.
     Require(unresolvedCpuCandidates == 0u, label + "CPU finder produced unresolved V0 daughters");
     if (cpu.size() != 1u || gpu.size() != 1u || comparison.matched != 1u) {
       std::cerr << "DETAIL cbmroot-cpu-gpu-v0-" << test.name
@@ -513,11 +535,400 @@ namespace
               << " - CPU and GPU agree on V0 lineage and bounded fit observables" << std::endl;
   }
 
+  void CheckPublishableOutputRoute()
+  {
+    const V0Case test{"publishable-k0s", 211, -211, 310, 1, -1, 601, 602};
+    KFPTrackVector first;
+    KFPTrackVector last;
+    std::vector<float> chiToPrimaryVertex;
+    std::vector<KFVertex> primaryVertices;
+    MakeInput(test, first, last, chiToPrimaryVertex, primaryVertices);
+
+    KFParticleGpuFinder::Options options;
+    options.initializeXpuIfNeeded = false;
+    KFParticleGpuFinder::PreparedOptions run;
+    const auto result = KFParticleGpuFinder(options).ReconstructDetailedEvent(
+      {909u, first, last, chiToPrimaryVertex, primaryVertices}, run);
+
+    Require(result.status == ::kfparticle::gpu::GpuExecutionStatus::Completed,
+            "publishable-output GPU execution did not complete: " + result.message);
+    Require(result.materializationSucceeded,
+            "publishable-output GPU execution did not materialize an atomic event");
+    Require(!result.fullDiagnosticSnapshot && result.rawCandidates.empty()
+              && result.channels.empty(),
+            "publishable-output GPU execution retained full diagnostic snapshots");
+    Require(std::any_of(result.materializedParticles.begin(),
+                        result.materializedParticles.end(),
+                        [](const KFParticle& particle) {
+                          return particle.GetPDG() == 310;
+                        }),
+            "publishable-output GPU execution lost the K0S result");
+
+    std::cout << "PASS cbmroot-gpu-publishable-output"
+              << " - accepted particles materialized without CPU reference or full diagnostics"
+              << std::endl;
+  }
+
+  void CheckPublishableBatchOutputRoute()
+  {
+    const V0Case firstCase{"publishable-batch-k0s-a", 211, -211, 310, 1, -1, 611, 612};
+    const V0Case secondCase{"publishable-batch-k0s-b", 211, -211, 310, 1, -1, 621, 622};
+    KFPTrackVector firstTracks;
+    KFPTrackVector firstLast;
+    std::vector<float> firstChi;
+    std::vector<KFVertex> firstVertices;
+    KFPTrackVector secondTracks;
+    KFPTrackVector secondLast;
+    std::vector<float> secondChi;
+    std::vector<KFVertex> secondVertices;
+    MakeInput(firstCase, firstTracks, firstLast, firstChi, firstVertices);
+    MakeInput(secondCase, secondTracks, secondLast, secondChi, secondVertices);
+
+    ::kfparticle::gpu::GpuBatchLimits limits;
+    limits.events = 2u;
+    limits.tracks = 16u;
+    limits.vertices = 4u;
+    limits.twoDaughterTasks = 32u;
+    limits.candidates = 128u;
+    limits.daughterIds = 512u;
+    limits.selectedCandidates = 128u;
+    ::kfparticle::gpu::GpuBatchBuilder builder(limits, {310});
+    ::kfparticle::gpu::GpuEventInput firstInput;
+    firstInput.eventId = 910u;
+    firstInput.first = &firstTracks;
+    firstInput.last = &firstLast;
+    firstInput.chiToPrimaryVertex = &firstChi;
+    firstInput.primaryVertices = &firstVertices;
+    ::kfparticle::gpu::GpuEventInput secondInput;
+    secondInput.eventId = 911u;
+    secondInput.first = &secondTracks;
+    secondInput.last = &secondLast;
+    secondInput.chiToPrimaryVertex = &secondChi;
+    secondInput.primaryVertices = &secondVertices;
+    Require(builder.TryAppend(910u, firstInput)
+              == ::kfparticle::gpu::GpuBatchAppendResult::Added,
+            "publishable batch rejected its first event");
+    Require(builder.TryAppend(911u, secondInput)
+              == ::kfparticle::gpu::GpuBatchAppendResult::Added,
+            "publishable batch rejected its second event");
+
+    KFParticleGpuFinder::Options options;
+    options.initializeXpuIfNeeded = false;
+    options.materializationThreads = 2u;
+    KFParticleGpuFinder::PreparedOptions run;
+    const auto results = KFParticleGpuFinder(options).ReconstructPreparedBatch(builder.Seal(), run);
+    Require(results.size() == 2u && results[0].sourceEventId == 910u
+              && results[1].sourceEventId == 911u,
+            "publishable batch changed event count or source order");
+    for (const auto& result : results) {
+      Require(result.materializationThreadsRequested == 2u
+                && result.materializationThreadsUsed >= 1u
+                && result.materializationThreadsUsed <= 2u,
+              "publishable batch reported an invalid materialization worker count");
+      Require(result.status == ::kfparticle::gpu::GpuExecutionStatus::Completed,
+              "publishable batch event did not complete: " + result.message);
+      Require(result.materializationSucceeded,
+              "publishable batch event did not materialize atomically");
+      Require(!result.fullDiagnosticSnapshot && result.rawCandidates.empty()
+                && result.channels.empty(),
+              "publishable batch event retained full diagnostics");
+      Require(std::any_of(result.materializedParticles.begin(),
+                          result.materializedParticles.end(),
+                          [](const KFParticle& particle) {
+                            return particle.GetPDG() == 310;
+                          }),
+              "publishable batch event lost its K0S result");
+    }
+
+    std::cout << "PASS cbmroot-gpu-publishable-batch-output"
+              << " - two events materialized independently without diagnostic snapshots"
+              << std::endl;
+  }
+
+  void RequireDiagnosticAgreement(
+    const ::kfparticle::gpu::GpuRawCandidate& expected,
+    const ::kfparticle::gpu::GpuRawCandidate& actual,
+    int pvOffset, const char* context)
+  {
+    auto snapshot = actual.parity;
+    if (snapshot.primaryVertexIndex >= 0) { snapshot.primaryVertexIndex -= pvOffset; }
+    if (snapshot.bestPrimaryVertexIndex >= 0) { snapshot.bestPrimaryVertexIndex -= pvOffset; }
+    const auto difference = KFParticleGpuParity::Compare(
+      expected.parity, snapshot, KFParticleGpuParityTolerance{});
+    if (snapshot.available != expected.parity.available || !difference.Equivalent()) {
+      std::cerr << "DETAIL single/batch parity event=" << expected.parity.key.eventId
+                << " layout=" << context
+                << " channel=" << expected.channelId << " pdg=" << expected.pdg
+                << " issues=" << difference.issues
+                << " available=" << expected.parity.available << '/' << snapshot.available
+                << " selected=" << expected.parity.selected << '/' << snapshot.selected
+                << " selection_class=" << expected.parity.selectionClass << '/' << snapshot.selectionClass
+                << " rejections=" << expected.parity.rejectionReasons << '/' << snapshot.rejectionReasons
+                << " topology_status=" << expected.parity.topologyStatus << '/' << snapshot.topologyStatus
+                << " pv=" << expected.parity.primaryVertexIndex << '/' << snapshot.primaryVertexIndex
+                << " best_pv=" << expected.parity.bestPrimaryVertexIndex << '/' << snapshot.bestPrimaryVertexIndex
+                << " first_parameter=" << difference.firstParameter
+                << " first_covariance=" << difference.firstCovariance
+                << " residuals(parameter/covariance/fit/mass/mass_error/selection)="
+                << difference.maxParameterResidual << '/' << difference.maxCovarianceResidual << '/'
+                << difference.maxFitScalarResidual << '/' << difference.maxMassResidual << '/'
+                << difference.maxMassErrorResidual << '/' << difference.maxSelectionResidual << std::endl;
+    }
+    Require(snapshot.available == expected.parity.available && difference.Equivalent(),
+            "single/batch diagnostics changed fit, covariance or selection");
+    const bool selected = snapshot.selectionClass == KFGpuV0SelectionPrimary
+                          || snapshot.selectionClass == KFGpuV0SelectionSecondary;
+    if ((snapshot.available & KFGpuParitySelectionAvailable) != 0u) {
+      Require(actual.selected == selected && expected.selected == selected
+                && snapshot.selected == static_cast<unsigned int>(selected),
+              "diagnostic selection membership disagrees with the evaluated decision");
+    }
+  }
+
+  void CheckUnifiedExecutionPath()
+  {
+    using namespace cbm::algo::kfp;
+    GpuOwnedEventInput inputs[2];
+    for (unsigned int index = 0u; index < 2u; ++index) {
+      auto& input = inputs[index];
+      input.sourceEventId = (1ull << 32u) + 920u + index;
+      MakeInput({"unified", 211, -211, 310, 1, -1, 701, 702},
+                input.first, input.last, input.chiToPrimaryVertex, input.primaryVertices);
+    }
+    // Different PV counts exercise event-local indexing after batch reuse.
+    inputs[1].primaryVertices.push_back(MakePrimaryVertex());
+    ::kfparticle::gpu::GpuBatchBuilder builder(::kfparticle::gpu::DefaultGpuBatchLimits(2u));
+    for (const auto& input : inputs) {
+      Require(builder.TryAppend(input.sourceEventId, input.Input())
+                == ::kfparticle::gpu::GpuBatchAppendResult::Added,
+              "unified-path fixture exceeded its batch limits");
+    }
+    const auto batch = builder.Seal();
+    ::kfparticle::gpu::GpuExecutor executor(2u, 2u);
+    const auto published = executor.RunBatch(batch, ::kfparticle::gpu::GpuOutputMode::PublishableOutput);
+    Require(published.size() == 2u, "unified batch lost an event");
+
+    // An all-two-track but incomplete graph used to survive the single path's
+    // plan check. Both cascade and generic graph channels must be restored.
+    {
+      auto transaction = ::kfparticle::gpu::GpuRuntimeService::Instance().Acquire();
+      auto& plan = transaction.Steering().GetDecayPlan();
+      plan.Clear();
+      AddCpuFinderTwoDaughterChannels(plan);
+    }
+    unsigned long long completeRevision = 0u;
+    for (unsigned int eventIndex = 0u; eventIndex < 2u; ++eventIndex) {
+      const auto& input = inputs[eventIndex];
+      const auto single = executor.Run(input.sourceEventId, input.first, input.last,
+                                     input.chiToPrimaryVertex, input.primaryVertices);
+      const auto& expected = published[eventIndex];
+      Require(single.status == ::kfparticle::gpu::GpuExecutionStatus::Completed
+                && expected.status == single.status
+                && single.sourceEventId == expected.sourceEventId
+                && single.materializationSucceeded && expected.materializationSucceeded
+                && single.overflowFlags == 0u && expected.overflowFlags == 0u,
+              "single/batch publication failed: " + single.message);
+      Require(single.materializedParticles.size() == expected.materializedParticles.size()
+                && !single.materializedParticles.empty(),
+              "single/batch publication changed the particle count");
+      for (std::size_t index = 0u; index < single.materializedParticles.size(); ++index) {
+        const auto& left = single.materializedParticles[index];
+        const auto& right = expected.materializedParticles[index];
+        Require(left.Id() == right.Id() && left.GetPDG() == right.GetPDG()
+                  && left.DaughterIds() == right.DaughterIds()
+                  && left.GetQ() == right.GetQ() && left.GetNDF() == right.GetNDF()
+                  && std::abs(left.GetChi2() - right.GetChi2()) <= 1.e-4f,
+                "single/batch publication changed particle identity or fit metadata");
+        for (int component = 0; component < 8; ++component) {
+          Require(std::abs(left.GetParameter(component) - right.GetParameter(component)) <= 1.e-4f,
+                  "single/batch publication changed fitted parameters");
+        }
+        for (int component = 0; component < 36; ++component) {
+          Require(std::abs(left.GetCovariance(component) - right.GetCovariance(component)) <= 1.e-3f,
+                  "single/batch publication changed fitted covariance");
+        }
+      }
+
+      // Inspect under the same ownership lock as real execution. This also
+      // checks that the previous two-domain transaction was replaced, not reused.
+      auto transaction = ::kfparticle::gpu::GpuRuntimeService::Instance().Acquire();
+      auto& steering = transaction.Steering();
+      KFParticleGpuDecayPlan complete;
+      AddCompleteCpuFinderChannels(complete);
+      Require(steering.GetDecayPlan().NumberOfV0TrackCascadeChannels()
+                  == complete.NumberOfV0TrackCascadeChannels()
+                && steering.GetDecayPlan().NumberOfGraphOperationChannels()
+                  == complete.NumberOfGraphOperationChannels(),
+              "single execution retained an incomplete decay plan");
+      if (eventIndex != 0u) {
+        Require(steering.GetDecayPlan().Revision() == completeRevision,
+                "unchanged complete plan was unnecessarily rebuilt");
+      }
+      completeRevision = steering.GetDecayPlan().Revision();
+      const auto view = steering.GetBuffers().HostTransaction();
+      Require(view.Transaction()->domains.size == 1u && view.DomainCapacity() == 1u
+                && view.Domains()[0].sourceId == input.sourceEventId
+                && view.Domains()[0].sourceTracks.offset == 0u
+                && view.Domains()[0].primaryVertices.offset == 0u,
+              "single execution retained stale batch domains or truncated source identity");
+    }
+
+    ::kfparticle::gpu::GpuBatchBuilder restricted(::kfparticle::gpu::DefaultGpuBatchLimits(2u), {310});
+    for (const auto& input : inputs) {
+      Require(restricted.TryAppend(input.sourceEventId, input.Input())
+                == ::kfparticle::gpu::GpuBatchAppendResult::Added,
+              "restricted-plan fixture was rejected");
+    }
+    const auto restrictedResult = executor.RunBatch(restricted.Seal());
+    Require(restrictedResult.size() == 2u, "restricted batch lost an event");
+    for (const auto& result : restrictedResult) {
+      // An empty selected range may begin beyond the downloaded high-water
+      // mark. Its reserved offset does not imply that it contains any entries.
+      Require(result.status == ::kfparticle::gpu::GpuExecutionStatus::Completed
+                && !result.rawCandidates.empty() && result.selectedCandidates == 0u
+                && std::none_of(result.rawCandidates.begin(), result.rawCandidates.end(),
+                                [](const auto& raw) { return raw.selected; }),
+              "all-rejected batch changed diagnostic selection membership: " + result.message);
+    }
+    // Poison unused selected slots with a valid but rejected raw index. Only
+    // populated event ranges may be interpreted as selection membership.
+    {
+      auto transaction = ::kfparticle::gpu::GpuRuntimeService::Instance().Acquire();
+      auto& buffers = transaction.Steering().GetBuffers();
+      const auto selected = buffers.HostSelectedCandidates();
+      for (unsigned int index = 0u; index < selected.Capacity(); ++index) {
+        selected.Index(index) = 0u;
+        selected.ChannelId(index) = KFGpuChannelK0ShortToPiPlusPiMinus;
+      }
+      buffers.UploadSelectedCandidates();
+    }
+    const auto diagnostic = executor.RunBatch(batch);
+    Require(diagnostic.size() == 2u, "reused batch lost an event");
+    {
+      auto transaction = ::kfparticle::gpu::GpuRuntimeService::Instance().Acquire();
+      const auto& events = transaction.Steering().LastDecayPlanEventResults();
+      Require(events.size() == 2u && events[0].selectedCandidates.size > 0u
+                && events[1].selectedCandidates.offset > events[0].selectedCandidates.End(),
+              "sparse selected-index fixture did not exercise inter-event padding");
+    }
+    for (unsigned int eventIndex = 0u; eventIndex < 2u; ++eventIndex) {
+      const auto& input = inputs[eventIndex];
+      const auto single = executor.Run(input.sourceEventId, input.first, input.last,
+                                     input.chiToPrimaryVertex, input.primaryVertices);
+      ::kfparticle::gpu::GpuBatchBuilder one(::kfparticle::gpu::DefaultGpuBatchLimits(1u));
+      Require(one.TryAppend(input.sourceEventId, input.Input())
+                == ::kfparticle::gpu::GpuBatchAppendResult::Added,
+              "batch-of-one fixture was rejected");
+      const auto isolated = executor.RunBatch(one.Seal());
+      Require(isolated.size() == 1u, "batch-of-one lost its event");
+      for (unsigned int layout = 0u; layout < 2u; ++layout) {
+        const auto& reference = layout == 0u ? diagnostic[eventIndex] : isolated[0];
+        Require(reference.status == ::kfparticle::gpu::GpuExecutionStatus::Completed
+                  && single.status == reference.status
+                  && reference.sourceEventId == input.sourceEventId
+                  && reference.rawCandidates.size() == single.rawCandidates.size()
+                  && !single.rawCandidates.empty(),
+                "plan switch or batch reuse changed diagnostic candidate count");
+        for (const auto& candidate : single.rawCandidates) {
+          const auto match = std::find_if(reference.rawCandidates.begin(),
+                                          reference.rawCandidates.end(), [&](const auto& raw) {
+            return KFParticleGpuParity::Equal(raw.parity.key, candidate.parity.key);
+          });
+          Require(match != reference.rawCandidates.end(),
+                  "single/batch diagnostics changed candidate lineage");
+          const int pvOffset = layout == 0u
+            ? static_cast<int>(batch.Event(eventIndex).vertexOffset) : 0;
+          RequireDiagnosticAgreement(candidate, *match, pvOffset,
+            layout == 0u ? "batch" : "batch-of-one");
+        }
+      }
+    }
+    std::cout << "PASS cbmroot-gpu-unified-execution"
+              << " - nonempty single/batch output, plan switches and fresh domains agree"
+              << std::endl;
+  }
+
+  void CheckPrimaryVertexBatchIsolation()
+  {
+    using namespace cbm::algo::kfp;
+    GpuOwnedEventInput inputs[2];
+    for (unsigned int index = 0u; index < 2u; ++index) {
+      auto& input = inputs[index];
+      input.sourceEventId = (1ull << 32u) + 940u + index;
+      MakeInput({"primary-pv", 211, -211, 310, 1, -1, 801, 802},
+                input.first, input.last, input.chiToPrimaryVertex, input.primaryVertices);
+      if (index == 1u) {
+        input.primaryVertices = {MakePrimaryVertex(-100.f, -200.f, -300.f),
+                                 MakePrimaryVertex(10.f, 20.f, 30.f)};
+      }
+      for (auto* tracks : {&input.first, &input.last}) {
+        for (unsigned int track = 0u; track < 2u; ++track) {
+          tracks->SetPVIndex(static_cast<int>(index), track);
+          if (index == 1u) {
+            tracks->SetParameter(tracks->Parameter(0u)[track] + 10.f, 0u, track);
+            tracks->SetParameter(tracks->Parameter(1u)[track] + 20.f, 1u, track);
+            tracks->SetParameter(tracks->Parameter(2u)[track] + 30.f, 2u, track);
+            tracks->SetFieldCoefficient(30.f, 9u, track);
+          }
+        }
+      }
+    }
+    ::kfparticle::gpu::GpuBatchBuilder builder(::kfparticle::gpu::DefaultGpuBatchLimits(2u));
+    for (const auto& input : inputs) {
+      Require(builder.TryAppend(input.sourceEventId, input.Input()) == ::kfparticle::gpu::GpuBatchAppendResult::Added,
+              "primary-PV batch fixture was rejected");
+    }
+    const auto batch = builder.Seal();
+    ::kfparticle::gpu::GpuExecutor executor(2u, 2u);
+    const auto results = executor.RunBatch(batch);
+    Require(results.size() == 2u, "primary-PV batch lost an event");
+    unsigned int primaryCandidates = 0u;
+    for (unsigned int index = 0u; index < 2u; ++index) {
+      const auto& input = inputs[index];
+      const auto single = executor.Run(input.sourceEventId, input.first, input.last,
+                                       input.chiToPrimaryVertex, input.primaryVertices);
+      const auto& result = results[index];
+      Require(single.status == ::kfparticle::gpu::GpuExecutionStatus::Completed && result.status == single.status
+                && single.overflowFlags == 0u && result.overflowFlags == 0u
+                && !single.rawCandidates.empty()
+                && single.rawCandidates.size() == result.rawCandidates.size(),
+              "primary-PV single/batch reconstruction failed: " + result.message + "; " + single.message);
+      unsigned int eventPrimaryCandidates = 0u;
+      for (const auto& candidate : single.rawCandidates) {
+        const auto match = std::find_if(result.rawCandidates.begin(), result.rawCandidates.end(),
+          [&](const auto& raw) { return KFParticleGpuParity::Equal(candidate.parity.key, raw.parity.key); });
+        Require(match != result.rawCandidates.end(), "primary-PV batch changed candidate lineage");
+        const auto vertices = batch.Event(index).descriptor.primaryVertices;
+        if (match->primaryVertexIndex >= 0) {
+          Require(KFParticleGpuIsEventPrimaryVertex(match->primaryVertexIndex, vertices, batch.VertexCount()),
+                  "primary candidate refers to another event's PV");
+          ++eventPrimaryCandidates;
+        }
+        if (match->bestPrimaryVertexIndex >= 0) {
+          Require(KFParticleGpuIsEventPrimaryVertex(match->bestPrimaryVertexIndex, vertices, batch.VertexCount()),
+                  "primary candidate selection refers to another event's PV");
+        }
+        RequireDiagnosticAgreement(candidate, *match,
+          static_cast<int>(batch.Event(index).vertexOffset), "primary-PV batch");
+      }
+      Require(eventPrimaryCandidates > 0u, "primary-PV fixture did not exercise primary associations");
+      primaryCandidates += eventPrimaryCandidates;
+    }
+    inputs[1].last.SetPVIndex(static_cast<int>(inputs[1].primaryVertices.size()), 0u);
+    const auto invalid = executor.Run(inputs[1].sourceEventId, inputs[1].first, inputs[1].last,
+                                      inputs[1].chiToPrimaryVertex, inputs[1].primaryVertices);
+    Require(invalid.status == ::kfparticle::gpu::GpuExecutionStatus::InputRejected,
+            "out-of-event input PV association was not rejected");
+    std::cout << "PASS cbmroot-cpu-gpu-primary-pv-batch"
+              << " - distinct PVs, local indices 0/1, primary candidates=" << primaryCandidates
+              << ", single/batch fits and decisions agree" << std::endl;
+  }
+
   void ConfigureDefaultV0DistanceCut(float maxDistance)
   {
     KFParticleGpuDecayPlan& plan = KFParticleGpuRuntime::Instance().GetSteering().GetDecayPlan();
     KFParticleGpuDecayPlan completePlan;
-    AddCpuFinderTwoDaughterChannels(completePlan);
+    AddCompleteCpuFinderChannels(completePlan);
     plan.Clear();
     for (std::size_t index = 0u;
          index < completePlan.NumberOfTwoDaughterChannels(); ++index) {
@@ -527,6 +938,14 @@ namespace
         channel.selection.maxPrimaryVertexDistance = maxDistance;
       }
       plan.AddTwoDaughterChannel(channel);
+    }
+    for (std::size_t index = 0u;
+         index < completePlan.NumberOfV0TrackCascadeChannels(); ++index) {
+      plan.AddV0TrackCascadeChannel(completePlan.V0TrackCascadeChannel(index));
+    }
+    for (std::size_t index = 0u;
+         index < completePlan.NumberOfGraphOperationChannels(); ++index) {
+      plan.AddGraphOperationChannel(completePlan.GraphOperationChannel(index));
     }
   }
 
@@ -544,10 +963,10 @@ namespace
     // Duplicate PVs make the line-chi2 tie deterministic: the first packed
     // vertex must win, independently of CPU finder output ownership.
     primaryVertices.push_back(MakePrimaryVertex());
-    const auto baseline = cbm::algo::kfp::GpuDiagnosticRunner().Run(
+    const auto baseline = ::kfparticle::gpu::GpuExecutor().Run(
       906u, first, last, chiToPrimaryVertex, primaryVertices);
-    Require(baseline.status == cbm::algo::kfp::GpuDiagnosticStatus::Completed,
-            "multi-PV GPU diagnostic did not complete");
+    Require(baseline.status == ::kfparticle::gpu::GpuExecutionStatus::Completed,
+            "multi-PV GPU diagnostic did not complete: " + baseline.message);
     const auto findK0 = [](const auto& result) {
       return std::find_if(result.rawCandidates.begin(),
                           result.rawCandidates.end(),
@@ -569,9 +988,9 @@ namespace
             "multi-PV fixture did not report a finite positive line distance");
 
     ConfigureDefaultV0DistanceCut(distance);
-    const auto exactBoundary = cbm::algo::kfp::GpuDiagnosticRunner().Run(
+    const auto exactBoundary = ::kfparticle::gpu::GpuExecutor().Run(
       907u, first, last, chiToPrimaryVertex, primaryVertices);
-    Require(exactBoundary.status == cbm::algo::kfp::GpuDiagnosticStatus::Completed,
+    Require(exactBoundary.status == ::kfparticle::gpu::GpuExecutionStatus::Completed,
             "exact-distance GPU diagnostic did not complete: "
               + exactBoundary.message);
     const auto exactK0 = findK0(exactBoundary);
@@ -581,9 +1000,9 @@ namespace
             "exact line-distance boundary was not rejected");
 
     ConfigureDefaultV0DistanceCut(std::nextafter(distance, std::numeric_limits<float>::infinity()));
-    const auto aboveBoundary = cbm::algo::kfp::GpuDiagnosticRunner().Run(
+    const auto aboveBoundary = ::kfparticle::gpu::GpuExecutor().Run(
       908u, first, last, chiToPrimaryVertex, primaryVertices);
-    Require(aboveBoundary.status == cbm::algo::kfp::GpuDiagnosticStatus::Completed,
+    Require(aboveBoundary.status == ::kfparticle::gpu::GpuExecutionStatus::Completed,
             "above-boundary GPU diagnostic did not complete: "
               + aboveBoundary.message);
     const auto aboveK0 = findK0(aboveBoundary);
@@ -619,6 +1038,10 @@ int main(int argc, char** argv)
     CheckEquivalentCase({"k0s", 211, -211, 310, 1, -1, 101, 102}, 901u);
     CheckEquivalentCase({"lambda", 2212, -211, 3122, 1, -1, 201, 202}, 902u);
     CheckEquivalentCase({"anti-lambda", 211, -2212, -3122, 1, -1, 301, 302}, 903u);
+    CheckPublishableOutputRoute();
+    CheckPublishableBatchOutputRoute();
+    CheckUnifiedExecutionPath();
+    CheckPrimaryVertexBatchIsolation();
     CheckMultiPrimaryVertexTopologyBoundary();
 
     KFPTrackVector invalidFirst;
@@ -631,9 +1054,9 @@ int main(int argc, char** argv)
               invalidChi,
               invalidVertices);
     invalidChi.clear();
-    const auto invalid = cbm::algo::kfp::GpuDiagnosticRunner().Run(
+    const auto invalid = ::kfparticle::gpu::GpuExecutor().Run(
       904u, invalidFirst, invalidLast, invalidChi, invalidVertices);
-    Require(invalid.status == cbm::algo::kfp::GpuDiagnosticStatus::InputRejected,
+    Require(invalid.status == ::kfparticle::gpu::GpuExecutionStatus::InputRejected,
             "inconsistent synthetic input was not rejected");
     std::cout << "PASS cbmroot-cpu-gpu-v0-invalid-input - invalid GPU input is isolated" << std::endl;
 
@@ -647,9 +1070,9 @@ int main(int argc, char** argv)
               invalidFieldChi,
               invalidFieldVertices);
     invalidFieldFirst.SetFieldCoefficient(std::numeric_limits<float>::quiet_NaN(), 3u, 0u);
-    const auto invalidField = cbm::algo::kfp::GpuDiagnosticRunner().Run(
+    const auto invalidField = ::kfparticle::gpu::GpuExecutor().Run(
       905u, invalidFieldFirst, invalidFieldLast, invalidFieldChi, invalidFieldVertices);
-    Require(invalidField.status == cbm::algo::kfp::GpuDiagnosticStatus::FieldRejected,
+    Require(invalidField.status == ::kfparticle::gpu::GpuExecutionStatus::FieldRejected,
             "non-finite field input was not reported as a field rejection");
     std::cout << "PASS cbmroot-cpu-gpu-v0-invalid-field - invalid field metadata is isolated" << std::endl;
 

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
+cmake_minimum_required(VERSION 3.18 FATAL_ERROR)
 
 project(KFParticleLibrary LANGUAGES CXX)
 
@@ -6,15 +6,6 @@ project(KFParticleLibrary LANGUAGES CXX)
 if(NOT CMAKE_CXX_FLAGS MATCHES "-msse4.1")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msse4.1")
 endif()
-
-macro(add_target_property _target _prop _value)
-  get_target_property(_oldprop "${_target}" ${_prop})
-  if(NOT _oldprop)
-    set_target_properties("${_target}" PROPERTIES ${_prop} "${_value}")
-  else(NOT _oldprop)
-    set_target_properties("${_target}" PROPERTIES ${_prop} "${_oldprop} ${_value}")
-  endif(NOT _oldprop)
-endmacro(add_target_property)
 
 # The GPU implementation and its XPU dependency require the KFParticle
 # baseline to be C++17 in both standalone and embedded CBMRoot builds.
@@ -24,67 +15,44 @@ endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+option(KFPARTICLE_GPU_FIT_UNROLL "Enable explicit HIP fitting-loop unroll hints" ON)
+option(KFPARTICLE_BUILD_GPU_EXAMPLE "Build the file-driven GPU example in this target graph" OFF)
+set(KFPARTICLE_GPU_TIMING_BUILD_ID "unversioned" CACHE STRING
+    "Content identity for reproducible KFParticle timing builds")
+
 option(KFPARTICLE_USE_XPU "Build the KFParticle XPU infrastructure." OFF)
 option(KFPARTICLE_CBMROOT_EMBEDDED
        "Build KFParticle as part of the CBMRoot CMake target graph."
        OFF)
 set(KFPARTICLE_XPU_SOURCE_DIR "" CACHE PATH "Optional XPU source tree for standalone KFParticle builds")
+set(KFPARTICLE_XPU_ROOT "" CACHE PATH "Installed XPU prefix")
 set(XPU_SOURCE_DIR "" CACHE PATH "Legacy alias for KFPARTICLE_XPU_SOURCE_DIR")
 set(XPU_INCLUDE_DIR "" CACHE PATH "Optional legacy XPU include directory")
 
-if(KFPARTICLE_USE_XPU)
-  if(NOT KFPARTICLE_XPU_SOURCE_DIR AND XPU_SOURCE_DIR)
-    set(KFPARTICLE_XPU_SOURCE_DIR "${XPU_SOURCE_DIR}")
-  endif()
-
-  if(NOT CMAKE_VERSION VERSION_LESS "3.1")
-    if(NOT DEFINED CMAKE_CXX_STANDARD)
-      set(CMAKE_CXX_STANDARD 17)
-    elseif(CMAKE_CXX_STANDARD LESS 17)
-      set(CMAKE_CXX_STANDARD 17)
-    endif()
-    set(CMAKE_CXX_STANDARD_REQUIRED ON)
-    set(CMAKE_CXX_EXTENSIONS OFF)
-  endif()
-
-  if(NOT TARGET xpu)
-    if(EXISTS "${KFPARTICLE_XPU_SOURCE_DIR}/CMakeLists.txt")
-      # Standalone KFParticle owns its XPU build. CBMRoot shares its already
-      # configured target and therefore does not enter this branch.
-      add_subdirectory("${KFPARTICLE_XPU_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/xpu")
-    else()
-      message(FATAL_ERROR
-        "KFPARTICLE_USE_XPU requires an existing xpu target or "
-        "KFPARTICLE_XPU_SOURCE_DIR/XPU_SOURCE_DIR")
-    endif()
-  endif()
-
-  if(TARGET xpu)
-    get_target_property(KFPARTICLE_XPU_INCLUDE_DIRS xpu INTERFACE_INCLUDE_DIRECTORIES)
-  endif()
-
-  if(XPU_INCLUDE_DIR)
-    list(APPEND KFPARTICLE_XPU_INCLUDE_DIRS "${XPU_INCLUDE_DIR}")
-  elseif(NOT KFPARTICLE_XPU_INCLUDE_DIRS AND KFPARTICLE_XPU_SOURCE_DIR)
-    list(APPEND KFPARTICLE_XPU_INCLUDE_DIRS "${KFPARTICLE_XPU_SOURCE_DIR}/src")
-  endif()
-
-  if(KFPARTICLE_XPU_INCLUDE_DIRS)
-    foreach(KFPARTICLE_XPU_INCLUDE_DIR ${KFPARTICLE_XPU_INCLUDE_DIRS})
-      if(NOT EXISTS "${KFPARTICLE_XPU_INCLUDE_DIR}/xpu/host.h")
-        message(FATAL_ERROR
-          "KFParticle XPU include directory is invalid: ${KFPARTICLE_XPU_INCLUDE_DIR}")
-      endif()
-    endforeach()
-  else()
-    message(FATAL_ERROR
-      "KFPARTICLE_USE_XPU could not determine the XPU include directory")
+include(GNUInstallDirs)
+if(KFPARTICLE_CBMROOT_EMBEDDED)
+  set(sdk_default OFF)
+else()
+  set(sdk_default ON)
+  if(NOT CMAKE_LIBRARY_OUTPUT_DIRECTORY)
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
   endif()
 endif()
+option(KFPARTICLE_INSTALL_SDK "Install the standalone CMake SDK" ${sdk_default})
+if(KFPARTICLE_CBMROOT_EMBEDDED AND KFPARTICLE_INSTALL_SDK)
+  message(FATAL_ERROR "Build the standalone SDK separately from CBMRoot")
+endif()
 
+if(KFPARTICLE_USE_XPU)
+  include(cmake/KFParticleXpu.cmake)
+  kfparticle_configure_xpu()
+endif()
 list(APPEND CMAKE_PREFIX_PATH $ENV{ROOTSYS} ${ROOTSYS})
 
 set(FIXTARGET FALSE CACHE BOOL "Compile for fix target geometry.")
+if(KFPARTICLE_USE_XPU AND NOT FIXTARGET)
+  message(FATAL_ERROR "The current GPU host-input interface requires FIXTARGET=ON")
+endif()
 
 find_package(ROOT REQUIRED COMPONENTS Core Hist Matrix Physics EG Gpad Graf Graf3d RIO MathCore)
 If(DEFINED Vc_INCLUDE_DIR AND Vc_LIBRARIES)
@@ -186,19 +154,7 @@ if(FIXTARGET)
 #  file(WRITE ${SourceFile_new} ${Contents_Modified})
 
   add_library(KFParticle SHARED ${SOURCES} G__KFParticle_mod.cxx)
-  target_include_directories(KFParticle
-    PUBLIC
-        ${PROJECT_SOURCE_DIR}
-        ${PROJECT_SOURCE_DIR}/KFParticle
-        ${PROJECT_SOURCE_DIR}/KFParticlePerformance
-        ${PROJECT_SOURCE_DIR}/KFParticleTest
-        ${PROJECT_SOURCE_DIR}/KFParticle/KFPSimd
-        ${PROJECT_SOURCE_DIR}/KFParticle/KFPSimd/Utils
-        ${PROJECT_SOURCE_DIR}/KFParticle/KFPSimd/SSE
-)
   target_link_libraries(KFParticle PUBLIC ${ROOT_LIBRARIES} ${Vc_LIBRARIES})
-  add_target_property(KFParticle COMPILE_FLAGS "-DDO_TPCCATRACKER_EFF_PERFORMANCE -DNonhomogeneousField -DCBM -DUSE_TIMERS")
-#  add_target_property(KFParticle COMPILE_FLAGS "-DDO_TPCCATRACKER_EFF_PERFORMANCE -DHomogeneousField -DCBM -DUSE_TIMERS")
 
 
   ROOT_GENERATE_DICTIONARY(G__KFParticle ${HEADERS} LINKDEF KFLinkDef.h OPTIONS "-DDO_TPCCATRACKER_EFF_PERFORMANCE" "-DNonhomogeneousField" "-DCBM" "-DUSE_TIMERS")
@@ -208,28 +164,64 @@ else(FIXTARGET)
   ROOT_GENERATE_DICTIONARY(G__KFParticle ${HEADERS} LINKDEF KFLinkDef.h OPTIONS "-DDO_TPCCATRACKER_EFF_PERFORMANCE" "-DHomogeneousField" "-DUSE_TIMERS")
   add_library(KFParticle SHARED ${SOURCES} G__KFParticle.cxx)
   target_link_libraries(KFParticle PUBLIC ${ROOT_LIBRARIES} ${Vc_LIBRARIES})
-  add_target_property(KFParticle COMPILE_FLAGS "-DDO_TPCCATRACKER_EFF_PERFORMANCE -DHomogeneousField -DUSE_TIMERS")
 endif(FIXTARGET)
+
+# Propagate the scalar/track layout and SIMD baseline to external consumers.
+add_library(KFParticle::KFParticle ALIAS KFParticle)
+target_compile_features(KFParticle PUBLIC cxx_std_17)
+foreach(directory IN ITEMS "" KFParticle KFParticlePerformance KFParticleTest
+    KFParticle/KFPSimd KFParticle/KFPSimd/Utils KFParticle/KFPSimd/SSE)
+  target_include_directories(KFParticle PUBLIC
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/${directory}>"
+    "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/${directory}>")
+endforeach()
+target_include_directories(KFParticle PUBLIC
+  "$<BUILD_INTERFACE:${ROOT_INCLUDE_DIRS}>"
+  "$<BUILD_INTERFACE:${Vc_INCLUDE_DIR}>")
+target_compile_definitions(KFParticle PUBLIC DO_TPCCATRACKER_EFF_PERFORMANCE USE_TIMERS)
+if(FIXTARGET)
+  target_compile_definitions(KFParticle PUBLIC NonhomogeneousField CBM)
+else()
+  target_compile_definitions(KFParticle PUBLIC HomogeneousField)
+endif()
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(KFParticle PUBLIC -msse4.1)
+endif()
 
 if(KFPARTICLE_USE_XPU)
   # Register host-side GPU sources on the final target. This keeps embedded
   # CBMRoot and standalone builds on one source list and prevents a stale
   # partial GPU library with unresolved graph-plan symbols.
   target_sources(KFParticle PRIVATE
-    KFParticle/GPU/KFParticleGpuBufferManager.cxx
-    KFParticle/GPU/KFParticleGpuCpuChannelCatalogue.cxx
-    KFParticle/GPU/KFParticleGpuDecayGraphPlan.cxx
-    KFParticle/GPU/KFParticleGpuDecayPlan.cxx
-    KFParticle/GPU/KFParticleGpuDeviceImage.cxx
-    KFParticle/GPU/KFParticleGpuKernels.cxx
-    KFParticle/GPU/KFParticleGpuRoutingPlan.cxx
-    KFParticle/GPU/KFParticleGpuRuntime.cxx
-    KFParticle/GPU/KFParticleGpuSteering.cxx
+    KFParticle/GPU/data/KFParticleGpuInputPacker.cxx
+    KFParticle/GPU/planning/KFParticleGpuBatch.cxx
+    KFParticle/GPU/execution/KFParticleGpuExecutor.cxx
+    KFParticle/GPU/execution/KFParticleGpuFinder.cxx
+    KFParticle/GPU/execution/KFParticleGpuRuntimeService.cxx
+    KFParticle/GPU/execution/KFParticleGpuBufferManager.cxx
+    KFParticle/GPU/planning/KFParticleGpuCpuChannelCatalogue.cxx
+    KFParticle/GPU/planning/KFParticleGpuDecayGraphPlan.cxx
+    KFParticle/GPU/planning/KFParticleGpuDecayPlan.cxx
+    KFParticle/GPU/execution/KFParticleGpuKernels.cxx
+    KFParticle/GPU/planning/KFParticleGpuRoutingPlan.cxx
+    KFParticle/GPU/execution/KFParticleGpuRuntime.cxx
+    KFParticle/GPU/execution/KFParticleGpuSteering.cxx
   )
   target_compile_definitions(KFParticle PUBLIC KFPARTICLE_USE_XPU)
   target_include_directories(KFParticle PUBLIC
-    ${PROJECT_SOURCE_DIR}/KFParticle/GPU
-    ${KFPARTICLE_XPU_INCLUDE_DIRS})
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/KFParticle/GPU>"
+    "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/KFParticle/GPU>")
+  foreach(directory IN LISTS KFPARTICLE_XPU_INCLUDE_DIRS)
+    target_include_directories(KFParticle PUBLIC "$<BUILD_INTERFACE:${directory}>")
+  endforeach()
+  # Host packing and materialization retain their explicitly bounded workers.
+  # This dependency belongs to KFParticle now, not to its CBMRoot caller.
+  find_package(Threads REQUIRED)
+  target_link_libraries(KFParticle PUBLIC xpu PRIVATE Threads::Threads)
+  find_package(OpenMP QUIET COMPONENTS CXX)
+  if(OpenMP_CXX_FOUND)
+    target_link_libraries(KFParticle PRIVATE OpenMP::OpenMP_CXX)
+  endif()
   get_target_property(KFPARTICLE_LIBRARY_OUTPUT_DIRECTORY KFParticle LIBRARY_OUTPUT_DIRECTORY)
   if(NOT KFPARTICLE_LIBRARY_OUTPUT_DIRECTORY)
     if(KFPARTICLE_CBMROOT_EMBEDDED)
@@ -241,9 +233,19 @@ if(KFPARTICLE_USE_XPU)
       LIBRARY_OUTPUT_DIRECTORY "${KFPARTICLE_LIBRARY_OUTPUT_DIRECTORY}")
   endif()
   if(COMMAND xpu_attach)
+    if(KFPARTICLE_GPU_FIT_UNROLL)
+      set(KFPARTICLE_GPU_FIT_UNROLL_VALUE 1)
+    else()
+      set(KFPARTICLE_GPU_FIT_UNROLL_VALUE 0)
+    endif()
+    configure_file(KFParticle/GPU/KFParticleGpuBuildOptions.h.in
+      ${CMAKE_CURRENT_BINARY_DIR}/gpu-config/KFParticleGpuBuildOptions.h @ONLY)
+    target_include_directories(KFParticle BEFORE PUBLIC
+      "$<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/gpu-config>")
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/gpu-config/KFParticleGpuBuildOptions.h
+      DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/KFParticle/GPU")
     xpu_attach(KFParticle
-      KFParticle/GPU/KFParticleGpuDeviceImage.cxx
-      KFParticle/GPU/KFParticleGpuKernels.cxx
+      KFParticle/GPU/execution/KFParticleGpuKernels.cxx
     )
   else()
     message(FATAL_ERROR "KFPARTICLE_USE_XPU requires the xpu_attach CMake command")
@@ -280,15 +282,33 @@ Set(NODICT_HEADERS
   KFParticlePerformance/KFPartMatch.h
 )
 
-install(TARGETS KFParticle DESTINATION lib)
+if(KFPARTICLE_INSTALL_SDK)
+  if(APPLE)
+    set(sdk_origin "@loader_path")
+  else()
+    set(sdk_origin "$ORIGIN")
+  endif()
+  set_property(TARGET KFParticle PROPERTY INSTALL_RPATH "${sdk_origin}")
+  if(KFPARTICLE_XPU_LIBRARY_DIR)
+    set_property(TARGET KFParticle APPEND PROPERTY INSTALL_RPATH "${KFPARTICLE_XPU_LIBRARY_DIR}")
+  endif()
+  if(KFPARTICLE_OWNS_XPU)
+    set_property(TARGET xpu PROPERTY INSTALL_RPATH "${sdk_origin}")
+  endif()
+  include(cmake/KFParticleSdk.cmake)
+else()
+  install(TARGETS KFParticle DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+endif()
 
 install(DIRECTORY KFParticle
-        DESTINATION include
+        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
         FILES_MATCHING
-        PATTERN "*.h")
+        PATTERN "*.h"
+        PATTERN "test" EXCLUDE
+        PATTERN ".local" EXCLUDE)
 
 install(DIRECTORY KFParticlePerformance
-        DESTINATION include
+        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
         FILES_MATCHING
         PATTERN "*.h")
 
@@ -304,10 +324,10 @@ install(FILES
   KFParticlePerformance/KFMCTrack.h
   KFParticlePerformance/KFMCParticle.h
   KFParticlePerformance/KFPartEfficiencies.h
-  DESTINATION include/KFParticle)
+  DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/KFParticle")
 
 install(DIRECTORY KFParticleTest
-        DESTINATION include
+        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
         FILES_MATCHING
         PATTERN "*.h")
 
@@ -315,8 +335,8 @@ install(DIRECTORY KFParticleTest
 # ROOT writes dictionary side files next to this subproject's generated source.
 # Do not use CMAKE_BINARY_DIR here: embedded CBMRoot builds have a different
 # top-level binary directory.
-  install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}KFParticle.rootmap DESTINATION lib OPTIONAL)
-  install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}KFParticle_rdict.pcm DESTINATION lib OPTIONAL)
+  install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}KFParticle.rootmap DESTINATION "${CMAKE_INSTALL_LIBDIR}" OPTIONAL)
+  install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}KFParticle_rdict.pcm DESTINATION "${CMAKE_INSTALL_LIBDIR}" OPTIONAL)
 #endif()
 
 #install(FILES ${HEADERS} ${NODICT_HEADERS} DESTINATION include/KFParticle)
@@ -328,3 +348,10 @@ install(DIRECTORY KFParticleTest
 #install(FILES ${CMAKE_BINARY_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}KFParticle_rdict.pcm DESTINATION lib OPTIONAL)
 #install(FILES ${CMAKE_BINARY_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}KFParticle.rootmap DESTINATION lib)
 #install(TARGETS KFParticle DESTINATION lib)
+
+if(KFPARTICLE_BUILD_GPU_EXAMPLE)
+  if(NOT KFPARTICLE_USE_XPU)
+    message(FATAL_ERROR "The GPU example requires KFPARTICLE_USE_XPU=ON")
+  endif()
+  add_subdirectory(KFParticle/GPU/example gpu-example)
+endif()
