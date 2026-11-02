@@ -1,0 +1,15 @@
+/**
+ * @file
+ * @brief CMake template for build-local fit options and timing provenance.
+ *
+ * configure_file substitutes the placeholders into KFParticleGpuBuildOptions.h.
+ * The generated header shares settings with XPU images through include paths,
+ * rather than relying on target compile definitions propagating to image builds.
+ */
+#ifndef KFPARTICLEGPUBUILDOPTIONS_H
+#define KFPARTICLEGPUBUILDOPTIONS_H
+/** @brief Numeric switch controlling explicit unrolling in selected fixed-size fit loops. */
+#define KFPARTICLE_GPU_FIT_UNROLL @KFPARTICLE_GPU_FIT_UNROLL_VALUE@
+/** @brief Build provenance string recorded with timing output to distinguish compiled configurations. */
+#define KFPARTICLE_GPU_TIMING_BUILD_ID "@KFPARTICLE_GPU_TIMING_BUILD_ID@"
+#endif

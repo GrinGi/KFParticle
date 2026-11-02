@@ -395,6 +395,9 @@ class KFParticle
   void SetId(int id) { fId = id; }  ///< Sets the Id of the particle. After the construction of a particle
   ///< should be set by user.
   void AddDaughterId(int id) { fDaughtersIds.push_back(id); }  ///< Adds index of the daughter particle.
+  void ReserveDaughterIds(unsigned int count) {
+    fDaughtersIds.reserve(count);
+  } ///< Reserves storage for daughter-particle indices.
 
   void SetPDG(int pdg) { fPDG = pdg; }  ///< Sets the PDG hypothesis.
   int GetPDG() const { return fPDG; }   ///< Returns the PDG hypothesis.

@@ -43,6 +43,8 @@
 #include "TProfile2D.h"
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <map>
 
 using std::sort;
@@ -1466,7 +1468,8 @@ void KFTopoPerformance::FillParticleParameters(
 
   float chi2 = TempPart.GetChi2();
   Int_t ndf  = TempPart.GetNDF();
-  float prob = TMath::Prob(chi2, ndf);  //(TDHelper<float>::Chi2IProbability( ndf, chi2 ));
+  const float undefined = std::numeric_limits<float>::quiet_NaN();
+  float prob = ndf > 0 && chi2 >= 0.f ? TMath::Prob(chi2, ndf) : undefined;  //(TDHelper<float>::Chi2IProbability( ndf, chi2 ));
   X          = TempPart.GetX();
   Y          = TempPart.GetY();
   Z          = TempPart.GetZ();
@@ -1531,7 +1534,7 @@ void KFTopoPerformance::FillParticleParameters(
   //     M0 -= daughterMass;
   //   }
 
-  float parameters[17] = {M,   P, Pt, Rapidity, dL, cT,   chi2 / ndf,   prob, Theta,
+  float parameters[17] = {M,   P, Pt, Rapidity, dL, cT,   ndf > 0 ? chi2 / ndf : undefined,   prob, Theta,
                           Phi, X, Y,  Z,        R,  l[0], l[0] / dl[0], M_t};
   /*
   float errors[8] = {TempPart.GetErrX(),
@@ -1545,7 +1548,7 @@ void KFTopoPerformance::FillParticleParameters(
   */
 
   //for all particle-candidates
-  for (int iParam = 0; iParam < 17; iParam++) { histoParameters[0][iParticle][iParam]->Fill(parameters[iParam], 1); }
+  for (int iParam = 0; iParam < 17; iParam++) { if (std::isfinite(parameters[iParam])) { histoParameters[0][iParticle][iParam]->Fill(parameters[iParam], 1); } }
   // for(int iParam=0; iParam<8; iParam++)
   //   histoParameters[0][iParticle][18+iParam]->Fill(errors[iParam], 1);
 
@@ -1672,7 +1675,7 @@ void KFTopoPerformance::FillParticleParameters(
     if (fabs(fParteff.GetMass(iParticle) - M) < 3.f * fParteff.GetMassSigma(iParticle))  //SignalReco
     {
       for (int iParam = 0; iParam < 17; iParam++) {
-        histoParameters[4][iParticle][iParam]->Fill(parameters[iParam], weight);
+        if (std::isfinite(parameters[iParam])) { histoParameters[4][iParticle][iParam]->Fill(parameters[iParam], weight); }
       }
       // for(int iParam=0; iParam<8; iParam++)
       //   histoParameters[4][iParticle][18+iParam]->Fill(errors[iParam], weight);
@@ -1694,7 +1697,7 @@ void KFTopoPerformance::FillParticleParameters(
         && fabs(fParteff.GetMass(iParticle) - M) <= 6.f * fParteff.GetMassSigma(iParticle))  //BGReco
     {
       for (int iParam = 0; iParam < 17; iParam++) {
-        histoParameters[5][iParticle][iParam]->Fill(parameters[iParam], weight);
+        if (std::isfinite(parameters[iParam])) { histoParameters[5][iParticle][iParam]->Fill(parameters[iParam], weight); }
       }
       // for(int iParam=0; iParam<8; iParam++)
       //   histoParameters[5][iParticle][18+iParam]->Fill(errors[iParam], weight);
@@ -1751,7 +1754,7 @@ void KFTopoPerformance::FillParticleParameters(
   }
 
   //for signal particles
-  for (int iParam = 0; iParam < 17; iParam++) { histoParameters[iSet][iParticle][iParam]->Fill(parameters[iParam]); }
+  for (int iParam = 0; iParam < 17; iParam++) { if (std::isfinite(parameters[iParam])) { histoParameters[iSet][iParticle][iParam]->Fill(parameters[iParam]); } }
   // for(int iParam=0; iParam<8; iParam++)
   //   histoParameters[iSet][iParticle][18+iParam]->Fill(errors[iParam]);
 
@@ -2433,7 +2436,7 @@ void KFTopoPerformance::FillMCHistos()
     float parameters[17] = {M, P, Pt, Rapidity, decayLength, cT, 0, 0, Theta, Phi, X, Y, Z, R, L, 0, M_t};
     //for all particle-candidates
     for (int iParam = 0; iParam < 17; iParam++) {
-      if (hPartParam[6][iPDG][iParam]) { hPartParam[6][iPDG][iParam]->Fill(parameters[iParam]); }
+      if (hPartParam[6][iPDG][iParam] && std::isfinite(parameters[iParam])) { hPartParam[6][iPDG][iParam]->Fill(parameters[iParam]); }
     }
 
     if (hPartParam2D[6][iPDG][0]) { hPartParam2D[6][iPDG][0]->Fill(Rapidity, Pt, 1); }
