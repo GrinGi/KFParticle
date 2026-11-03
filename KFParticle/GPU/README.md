@@ -26,32 +26,36 @@ original SIMD CPU Finder.
 
 ## Standalone installation
 
-Set paths to your KFParticle checkout, build/install directories and existing
-dependencies. `XPU_PREFIX` is an installation prefix, not an XPU source directory.
+Replace the paths below with your KFParticle checkout, build/install directories
+of your choice and existing dependencies. `XPU_PREFIX` is an installation prefix,
+not an XPU source directory.
 KFParticle neither downloads nor modifies XPU and does not require a special
 XPU fork or a fixed commit.
 
 ```bash
 export KF_SOURCE=/path/to/KFParticle
-export KF_BUILD="$HOME/build-kfparticle"
-export KF_PREFIX="$HOME/opt/kfparticle"
+export KF_BUILD=/path/to/kfparticle-build
+export KF_PREFIX=/path/to/kfparticle-install
 export XPU_PREFIX=/path/to/installed/xpu
 export ROOT_PREFIX=/path/to/installed/root
 export VC_PREFIX=/path/to/installed/vc
 export ROCM_ROOT=/opt/rocm
-export GPU_ARCH=gfx908
 
+source "$ROOT_PREFIX/bin/thisroot.sh"
 cmake -S "$KF_SOURCE" -B "$KF_BUILD" \
   -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$KF_PREFIX" \
   -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_PREFIX_PATH="$ROOT_PREFIX;$VC_PREFIX" \
   -DKFPARTICLE_USE_XPU=ON -DFIXTARGET=ON -DKFPARTICLE_INSTALL_SDK=ON \
   -DKFPARTICLE_XPU_ROOT="$XPU_PREFIX" -DXPU_ENABLE_HIP=ON -DXPU_ENABLE_OPENMP=ON \
-  -DXPU_HIP_ARCH="$GPU_ARCH" -DXPU_ROCM_ROOT="$ROCM_ROOT"
+  -DXPU_HIP_ARCH=native -DXPU_ROCM_ROOT="$ROCM_ROOT"
 cmake --build "$KF_BUILD" --parallel 8
 cmake --install "$KF_BUILD"
 ```
 
-Choose `GPU_ARCH` for your GPU; multiple targets can be separated by semicolons.
+`native` automatically detects the architectures of GPUs visible during
+compilation; no architecture names need to be entered. Build with the intended
+GPUs accessible and use XPU built for those architectures as well. For a build
+targeting other machines, set `XPU_HIP_ARCH` to their architecture list instead.
 `FIXTARGET=ON` selects the nonhomogeneous field model required by the current GPU
 input interface. For a CPU-XPU build use `-DXPU_ENABLE_HIP=OFF` and omit the ROCm
 options. Use compatible compiler, ROOT/Vc and XPU builds throughout.
@@ -68,7 +72,7 @@ or application runtime paths. Adjust `XPU_LIB_DIR` if XPU uses `lib64`:
 
 ```bash
 export XPU_LIB_DIR="$XPU_PREFIX/lib"
-export LD_LIBRARY_PATH="$KF_PREFIX/lib:$XPU_LIB_DIR:$ROOT_PREFIX/lib:$VC_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="$KF_PREFIX/lib:$XPU_LIB_DIR:$(root-config --libdir):$VC_PREFIX/lib:$ROCM_ROOT/lib:$ROCM_ROOT/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 ```
 
 ## Using the C++ library
@@ -167,7 +171,7 @@ Use the dependency paths and runtime library environment from
 [Standalone installation](#standalone-installation):
 
 ```bash
-export EXAMPLE_BUILD="$HOME/build-kfparticle-example"
+export EXAMPLE_BUILD=/path/to/kfparticle-example-build
 cmake -S "$KF_PREFIX/share/KFParticle/example" -B "$EXAMPLE_BUILD" \
   -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$KF_PREFIX;$ROOT_PREFIX;$VC_PREFIX" \
   -DKFPARTICLE_XPU_ROOT="$XPU_PREFIX"
@@ -192,7 +196,8 @@ export KFP_EXAMPLE="$CBM_BUILD/bin/KFParticleGpuExample"
 ### Run and inspect the output
 
 Run from a writable directory. No reconstruction configuration or input dataset
-is required:
+is required. For the standalone installation, `"$XPU_PREFIX/bin/xpuinfo"` lists
+the available devices:
 
 ```bash
 "$KFP_EXAMPLE" hip0
@@ -260,7 +265,7 @@ recipes. Synthetic API tests do not establish complete physics equivalence.
 After the standalone installation above, build only the small test application:
 
 ```bash
-export KF_CHECK="$HOME/build-kfparticle-check"
+export KF_CHECK=/path/to/kfparticle-check-build
 cmake -S "$KF_PREFIX/share/KFParticle/standalone" -B "$KF_CHECK" \
   -DKFPARTICLE_GPU_TEST_INSTALLED=ON -DKFPARTICLE_GPU_TEST_DEVICE=hip0 \
   -DCMAKE_PREFIX_PATH="$KF_PREFIX;$ROOT_PREFIX;$VC_PREFIX" \
