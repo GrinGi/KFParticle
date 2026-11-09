@@ -2,20 +2,41 @@
 set -euo pipefail
 export LC_ALL=C
 
+contract_mode="${1:-cbmroot}"
+case "$contract_mode" in
+  cbmroot|sdk) ;;
+  -h|--help)
+    echo "Usage: $(basename "$0") [cbmroot|sdk]"
+    echo "  cbmroot: embedded targets, ABI settings and shared XPU (default; no SDK required)"
+    echo "  sdk: standalone package export/import and installed-XPU checks (no CBMRoot required)"
+    exit 0 ;;
+  *) echo "FAIL unknown build contract: $contract_mode (expected cbmroot or sdk)" >&2; exit 2 ;;
+esac
+[[ $# -le 1 ]] || { echo "FAIL unexpected build-contract arguments" >&2; exit 2; }
+echo "KFParticle build contract: $contract_mode"
+
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source_dir="$(cd "$here/../../../../../.." && pwd)"
 temporary="$(mktemp -d)"
 trap 'rm -rf "$temporary"' EXIT
-trap 'echo "FAIL kfp-build-registration at line $LINENO" >&2' ERR
+trap 'echo "FAIL kfp-build-registration at line $LINENO: $BASH_COMMAND" >&2
+  if [[ -n "${failure_log:-}" && -f "$failure_log" ]]; then tail -n 80 "$failure_log" >&2; fi' ERR
 
 gpu_dir="$(cd "$here/../.." && pwd)"
+kfp_source="$(cd "$gpu_dir/../.." && pwd)"
+
+if [[ "$contract_mode" == cbmroot ]]; then
+source_dir="$(cd "$here/../../../../../.." && pwd)"
 adapter_dir="$source_dir/algo/kfp/gpu"
+if [[ ! -r "$adapter_dir/CMakeLists.txt" || ! -r "$source_dir/external/InstallKFParticle.cmake" ]]; then
+  echo "FAIL cbmroot mode requires a CBMRoot checkout; use sdk for standalone package checks" >&2
+  exit 2
+fi
 for retired in KfpGpuMaterializationAdapter.h KfpGpuMaterializationAdapter.cxx \
     KfpGpuDiagnosticStatus.h KfpGpuBatchPolicy.h KfpGpuBatchPolicy.cxx \
     KfpGpuPerformanceReport.h KfpGpuPerformanceReport.cxx \
     KfpGpuInputPacker.h KfpGpuInputPacker.cxx KfpGpuBatch.h KfpGpuBatch.cxx \
     KfpGpuExecutor.h KfpGpuExecutor.cxx KfpGpuRuntimeService.h KfpGpuRuntimeService.cxx \
-    KfpGpuMaterializationSchedule.h; do
+    KfpGpuMaterializationSchedule.h KfpGpuTrace.h; do
   if [[ -e "$adapter_dir/$retired" ]]; then
     echo "FAIL stale adapter source: $adapter_dir/$retired" >&2
     exit 1
@@ -25,10 +46,16 @@ for stale in "$adapter_dir"/KfpGpuDiagnostic*.h "$adapter_dir"/KfpGpuDiagnostic*
     "$adapter_dir/test/_GTestKfpGpuDiagnosticPacker.cxx" \
     "$adapter_dir/test/_GTestKfpGpuInputPacker.cxx" \
     "$adapter_dir/test/_GTestKfpGpuBatch.cxx" \
-    "$adapter_dir/test/_GTestKfpGpuRunner.cxx"; do
+    "$adapter_dir/test/_GTestKfpGpuRunner.cxx" \
+    "$adapter_dir/test/_GTestKfpGpuExecutor.cxx"; do
   if [[ -e "$stale" ]]; then
     echo "FAIL stale adapter source: $stale" >&2
     exit 1
+  fi
+done
+for patch in KFParticle_applem1.patch KFParticle_clang_tidy.patch; do
+  if [[ -e "$source_dir/external/$patch" ]]; then
+    echo "FAIL retired KFParticle patch: $source_dir/external/$patch" >&2; exit 1
   fi
 done
 for directory in data planning execution algorithms diagnostics; do
@@ -76,7 +103,7 @@ if grep -Eq '#include "algo/|using cbm::' "$gpu_dir/test/standalone/KFParticleGp
 fi
 
 # Configure the real adapter CMake with dependency targets, not fake headers.
-# Compile its ROOT-free trace declaration in isolation; do not initialize XPU.
+# Compile the ROOT-free comparison/trace declarations without initializing XPU.
 cat >"$temporary/CMakeLists.txt" <<'CMAKE'
 cmake_minimum_required(VERSION 3.14)
 project(KfpBuildRegistration LANGUAGES CXX)
@@ -119,18 +146,20 @@ if(NOT BUILD_TESTING)
       OR TARGET KFParticleGpuHostInterfaceTest)
     message(FATAL_ERROR "BUILD_TESTING=OFF retained test targets")
   endif()
-  # Include Trace first, without a transitive declaration of the moved result.
+  # Include the consolidated declarations first, without ROOT or a result definition.
   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/trace-header.cxx"
-    "#include \"${ADAPTER_DIR}/KfpGpuTrace.h\"\n"
-    "#include \"${ADAPTER_DIR}/KfpGpuTrace.h\"\n"
+    "#include \"${ADAPTER_DIR}/KfpGpuComparison.h\"\n"
+    "#include \"${ADAPTER_DIR}/KfpGpuComparison.h\"\n"
     "#include <type_traits>\n"
     "static_assert(std::is_pointer_v<decltype(&cbm::algo::kfp::TraceFirstGpuMismatch)>);\n"
     "int main() { return 0; }\n")
   try_compile(trace_header_compiles "${CMAKE_CURRENT_BINARY_DIR}/trace-header-check"
     "${CMAKE_CURRENT_BINARY_DIR}/trace-header.cxx"
-    CMAKE_FLAGS "-DCMAKE_CXX_STANDARD=17" OUTPUT_VARIABLE trace_header_output)
+    CMAKE_FLAGS "-DCMAKE_CXX_STANDARD=17"
+      "-DINCLUDE_DIRECTORIES:STRING=${ADAPTER_DIR}/../../../external/KFParticle/KFParticle/GPU"
+    OUTPUT_VARIABLE trace_header_output)
   if(NOT trace_header_compiles)
-    message(FATAL_ERROR "trace header is not self-contained:\n${trace_header_output}")
+    message(FATAL_ERROR "comparison/trace declarations are not self-contained:\n${trace_header_output}")
   endif()
   return()
 endif()
@@ -162,12 +191,12 @@ if(WITH_GTEST)
     message(FATAL_ERROR "GTest adapter target is missing")
   endif()
   get_target_property(sources _GTestKfpGpuAdapter SOURCES)
-  foreach(component Comparison Materialization Policy Report Executor)
+  foreach(component Comparison Materialization Policy Report)
     if(NOT "test/_GTestKfpGpu${component}.cxx" IN_LIST sources)
       message(FATAL_ERROR "adapter coverage source is missing: ${component}")
     endif()
   endforeach()
-  foreach(component InputPacker Batch)
+  foreach(component InputPacker Batch Executor)
     if("test/_GTestKfpGpu${component}.cxx" IN_LIST sources)
       message(FATAL_ERROR "common host checks are still compiled by CBMRoot: ${component}")
     endif()
@@ -341,8 +370,9 @@ done
 printf '// Not compiled.\n' >"$fixture_gpu/.local/ignored.h"
 [[ "$(fixture_fingerprint)" == "$before" ]]
 echo "PASS kfp-build-registration nested sources affect identity; local notes do not"
+fi
 
-# Export/import graph only: dependency fixtures below are not numerical tests.
+# Dependency fixtures for configuration checks; these are not numerical tests.
 sdk="$temporary/sdk"
 mkdir -p "$sdk/deps" "$sdk/xpu/src/xpu" "$sdk/project" "$sdk/consumer" \
   "$sdk/installed-xpu/include/xpu" "$sdk/installed-xpu/lib64"
@@ -378,17 +408,159 @@ cat >"$sdk/xpu/CMakeLists.txt" <<'CMAKE'
 add_library(xpu SHARED dummy.cpp)
 target_include_directories(xpu PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 function(xpu_attach target)
+  # Match upstream's host-runtime dependency, without compiling device images.
+  set_property(TARGET ${target} APPEND PROPERTY LINK_LIBRARIES xpu)
 endfunction()
 CMAKE
 touch "$sdk/xpu/dummy.cpp" "$sdk/xpu/src/xpu/host.h" "$sdk/xpu/LICENSE"
+
+# Both CBMRoot entry points must reuse the current KFParticle target, without
+# applying patches for retired source layouts or compiling a second copy.
+if [[ "$contract_mode" == cbmroot ]]; then
+mkdir -p "$sdk/cbm/external"
+ln -s "$gpu_dir/../.." "$sdk/cbm/external/KFParticle"
+cat >"$sdk/cbm/external/CMakeLists.txt" <<'CMAKE'
+include("${CBM_SOURCE}/external/InstallKFParticle.cmake")
+CMAKE
+cat >"$sdk/cbm/CMakeLists.txt" <<'CMAKE'
+cmake_minimum_required(VERSION 3.18)
+project(KfpCbmGraph LANGUAGES CXX)
+function(download_project_if_needed)
+  if("PATCH_COMMAND" IN_LIST ARGN)
+    message(FATAL_ERROR "obsolete KFParticle patch requested")
+  endif()
+  set_property(GLOBAL PROPERTY download_requested TRUE)
+endfunction()
+if(CBM_KFPARTICLE_USE_XPU AND NOT OMIT_PARENT_XPU)
+  add_subdirectory("${XPU_FIXTURE}" xpu)
+  get_target_property(parent_xpu_source xpu SOURCE_DIR)
+  # Check the fixture independently: some KFParticle versions link xpu
+  # explicitly as well, which would conceal a no-op attachment stub.
+  add_library(XpuAttachContract STATIC EXCLUDE_FROM_ALL "${XPU_FIXTURE}/dummy.cpp")
+  xpu_attach(XpuAttachContract)
+  get_target_property(attach_links XpuAttachContract LINK_LIBRARIES)
+  if(NOT "xpu" IN_LIST attach_links)
+    message(FATAL_ERROR "XPU fixture xpu_attach did not link its runtime")
+  endif()
+endif()
+file(WRITE "${CMAKE_BINARY_DIR}/external/KFPARTICLE-prefix/keep.txt" "Unrelated legacy build artifacts.\n")
+set(parent_sdk_setting "${KFPARTICLE_INSTALL_SDK}")
+add_subdirectory(external)
+if(NOT EXISTS "${CMAKE_BINARY_DIR}/external/KFPARTICLE-prefix/keep.txt")
+  message(FATAL_ERROR "KFParticle configuration deleted an existing build directory")
+endif()
+if(NOT "${KFPARTICLE_INSTALL_SDK}" STREQUAL "${parent_sdk_setting}")
+  message(FATAL_ERROR "Embedded SDK override changed the parent configuration")
+endif()
+add_subdirectory("${CBM_SOURCE}/algo/kfp/interface" interface)
+get_target_property(interface_type CbmKFParticleOnlineInterface TYPE)
+get_target_property(interface_links CbmKFParticleOnlineInterface INTERFACE_LINK_LIBRARIES)
+if(NOT interface_type STREQUAL "INTERFACE_LIBRARY" OR NOT interface_links STREQUAL "KFParticle")
+  message(FATAL_ERROR "CBMRoot does not reuse the actual KFParticle target")
+endif()
+get_target_property(interface_definitions CbmKFParticleOnlineInterface INTERFACE_COMPILE_DEFINITIONS)
+foreach(definition DO_TPCCATRACKER_EFF_PERFORMANCE NonhomogeneousField CBM USE_TIMERS)
+  if(NOT "${definition}" IN_LIST interface_definitions)
+    message(FATAL_ERROR "CBMRoot KFParticle ABI definition is missing: ${definition}")
+  endif()
+endforeach()
+if(DROP_PARENT_XPU_LINK)
+  set_property(TARGET KFParticle PROPERTY LINK_LIBRARIES "")
+endif()
+get_target_property(kfp_links KFParticle LINK_LIBRARIES)
+if(CBM_KFPARTICLE_USE_XPU AND NOT "xpu" IN_LIST kfp_links)
+  message(FATAL_ERROR "parent XPU was not reused; KFParticle links: ${kfp_links}")
+endif()
+if(CBM_KFPARTICLE_USE_XPU)
+  get_target_property(xpu_source xpu SOURCE_DIR)
+  get_target_property(xpu_imported xpu IMPORTED)
+  if(xpu_imported OR NOT xpu_source STREQUAL parent_xpu_source)
+    message(FATAL_ERROR "KFParticle replaced the parent XPU target")
+  endif()
+endif()
+if(EXISTS "${CMAKE_BINARY_DIR}/external/KFParticle/KFParticleConfig.cmake")
+  message(FATAL_ERROR "Embedded KFParticle unexpectedly enabled standalone SDK installation")
+endif()
+get_property(download_requested GLOBAL PROPERTY download_requested)
+if(KFPARTICLE_UPDATE_SOURCE AND NOT download_requested)
+  message(FATAL_ERROR "explicit source update was ignored")
+elseif(NOT KFPARTICLE_UPDATE_SOURCE AND download_requested)
+  message(FATAL_ERROR "configure modified an existing checkout")
+endif()
+CMAKE
+for standalone in OFF ON; do
+  for gpu in OFF ON; do
+    log="$sdk/cbm-$standalone-$gpu.log"
+    if ! cmake -S "$sdk/cbm" -B "$sdk/cbm-$standalone-$gpu" \
+        -DCMAKE_PREFIX_PATH="$sdk/deps" -DCBM_SOURCE="$source_dir" \
+        -DXPU_FIXTURE="$sdk/xpu" -DKFPARTICLE_INSTALL_SDK=ON \
+        -DCBM_ONLINE_STANDALONE="$standalone" -DCBM_KFPARTICLE_USE_XPU="$gpu" \
+        -DKFPARTICLE_UPDATE_SOURCE="$standalone" >"$log" 2>&1; then
+      cat "$log" >&2; exit 1
+    fi
+  done
+done
+echo "PASS kfp-build-registration CBMRoot/online CPU/GPU target reuse and patch-free source update"
+
+for failure in OMIT_PARENT_XPU DROP_PARENT_XPU_LINK; do
+  failure_log="$sdk/cbm-$failure.log"
+  if cmake --log-level=WARNING -S "$sdk/cbm" -B "$sdk/cbm-$failure" \
+      -DCMAKE_PREFIX_PATH="$sdk/deps" -DCBM_SOURCE="$source_dir" \
+      -DXPU_FIXTURE="$sdk/xpu" -DCBM_KFPARTICLE_USE_XPU=ON "-D$failure=ON" \
+      >"$failure_log" 2>&1; then
+    echo "FAIL embedded build accepted $failure" >&2; exit 1
+  fi
+  case "$failure" in
+    OMIT_PARENT_XPU) grep -q 'requires the parent xpu target' "$failure_log" ;;
+    DROP_PARENT_XPU_LINK) grep -q 'parent XPU was not reused' "$failure_log" ;;
+  esac
+done
+echo "PASS kfp-build-registration missing parent runtime/dependency rejected"
+
+# Exercise the pre-SDK embedded interface, including private-only ABI flags.
+mkdir -p "$sdk/embedded-only"
+cat >"$sdk/embedded-only/CMakeLists.txt" <<'CMAKE'
+cmake_minimum_required(VERSION 3.18)
+project(KfpEmbeddedOnly LANGUAGES CXX)
+add_library(KFParticle SHARED "${XPU_FIXTURE}/dummy.cpp")
+set_target_properties(KFParticle PROPERTIES COMPILE_FLAGS
+  "-DDO_TPCCATRACKER_EFF_PERFORMANCE -DNonhomogeneousField -DCBM -DUSE_TIMERS")
+if(KFPARTICLE_USE_XPU)
+  xpu_attach(KFParticle)
+endif()
+CMAKE
+rm "$sdk/cbm/external/KFParticle"
+ln -s "$sdk/embedded-only" "$sdk/cbm/external/KFParticle"
+for gpu in OFF ON; do
+  failure_log="$sdk/embedded-only-$gpu.log"
+  if ! cmake -S "$sdk/cbm" -B "$sdk/embedded-only-$gpu" \
+      -DCMAKE_PREFIX_PATH="$sdk/deps" -DCBM_SOURCE="$source_dir" \
+      -DXPU_FIXTURE="$sdk/xpu" -DCBM_KFPARTICLE_USE_XPU="$gpu" \
+      >"$failure_log" 2>&1; then
+    cat "$failure_log" >&2; exit 1
+  fi
+done
+echo "PASS kfp-build-registration embedded ABI and XPU checks without SDK support"
+exit 0
+fi
+
+# Only the explicitly selected standalone-SDK contract needs these files.
+for file in CMakeLists.txt cmake/KFParticleSdk.cmake cmake/KFParticleXpu.cmake cmake/KFParticleConfig.cmake.in; do
+  if [[ ! -r "$kfp_source/$file" ]]; then
+    echo "FAIL incomplete KFParticle SDK build files: $kfp_source/$file" >&2
+    exit 1
+  fi
+done
+
 cat >"$sdk/project/CMakeLists.txt" <<'CMAKE'
 cmake_minimum_required(VERSION 3.18)
 project(KfpSdkGraph LANGUAGES CXX)
-if(PARENT_XPU)
-  add_subdirectory("${KFPARTICLE_XPU_SOURCE_DIR}" parent-xpu)
-  set(KFPARTICLE_CBMROOT_EMBEDDED ON)
-endif()
 add_subdirectory("${KFP_SOURCE}" kfp)
+get_property(sdk_option_type CACHE KFPARTICLE_INSTALL_SDK PROPERTY TYPE)
+if(NOT sdk_option_type STREQUAL "BOOL")
+  message(FATAL_ERROR
+    "KFParticle does not provide the requested standalone SDK. SDK support is not required for the cbmroot contract.")
+endif()
 file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/fixture-prefix.cmake" CONTENT "
 file(MAKE_DIRECTORY \"${CMAKE_INSTALL_PREFIX}/lib64/cmake/KFParticle\"
   \"${CMAKE_INSTALL_PREFIX}/include/KFParticle/GPU\"
@@ -398,24 +570,41 @@ file(MAKE_DIRECTORY \"${CMAKE_INSTALL_PREFIX}/lib64/cmake/KFParticle\"
   \"${CMAKE_INSTALL_PREFIX}/include/KFParticleTest\")
 file(WRITE \"${CMAKE_INSTALL_PREFIX}/lib64/$<TARGET_FILE_NAME:KFParticle>\" \"\")
 file(WRITE \"${CMAKE_INSTALL_PREFIX}/lib64/$<TARGET_FILE_NAME:xpu>\" \"\")
-file(GLOB exports \"${CMAKE_BINARY_DIR}/kfp/CMakeFiles/Export/*/KFParticleTargets*.cmake\")
+file(GLOB_RECURSE exports \"${CMAKE_BINARY_DIR}/kfp/CMakeFiles/Export/KFParticleTargets*.cmake\")
+if(NOT exports)
+  message(FATAL_ERROR \"KFParticle SDK export files were not generated; check the KFParticle build-file version\")
+endif()
+foreach(metadata KFParticleConfig.cmake KFParticleConfigVersion.cmake)
+  if(NOT EXISTS \"${CMAKE_BINARY_DIR}/kfp/\${metadata}\")
+    message(FATAL_ERROR \"KFParticle SDK metadata is missing: ${CMAKE_BINARY_DIR}/kfp/\${metadata}\")
+  endif()
+endforeach()
 file(COPY \${exports} \"${CMAKE_BINARY_DIR}/kfp/KFParticleConfig.cmake\"
   \"${CMAKE_BINARY_DIR}/kfp/KFParticleConfigVersion.cmake\"
   \"${KFP_SOURCE}/cmake/KFParticleXpu.cmake\"
   DESTINATION \"${CMAKE_INSTALL_PREFIX}/lib64/cmake/KFParticle\")
 ")
 CMAKE
-kfp_source="$(cd "$gpu_dir/../.." && pwd)"
 sdk_args=(-S "$sdk/project" -DKFP_SOURCE="$kfp_source"
   -DKFPARTICLE_USE_XPU=ON -DFIXTARGET=ON -DKFPARTICLE_INSTALL_SDK=ON
   -DKFPARTICLE_XPU_SOURCE_DIR="$sdk/xpu" -DCMAKE_PREFIX_PATH="$sdk/deps"
   -DXPU_ENABLE_HIP=OFF -DXPU_ENABLE_OPENMP=OFF
   -DCMAKE_INSTALL_LIBDIR=lib64 -DCMAKE_INSTALL_PREFIX="$sdk/prefix")
-if ! cmake "${sdk_args[@]}" -B "$sdk/embedded" -DPARENT_XPU=ON \
-    -DKFPARTICLE_INSTALL_SDK=OFF >"$sdk/embedded.log" 2>&1; then
-  cat "$sdk/embedded.log" >&2; exit 1
+# Reject an entry point that ignores the requested standalone SDK installation.
+mkdir -p "$sdk/legacy"
+cat >"$sdk/legacy/CMakeLists.txt" <<'CMAKE'
+cmake_minimum_required(VERSION 3.18)
+project(KfpWithoutSdk LANGUAGES CXX)
+add_library(KFParticle SHARED "${CMAKE_CURRENT_SOURCE_DIR}/../xpu/dummy.cpp")
+CMAKE
+failure_log="$sdk/legacy.log"
+if cmake --log-level=WARNING "${sdk_args[@]}" -B "$sdk/legacy-build" \
+    -DKFP_SOURCE="$sdk/legacy" >"$failure_log" 2>&1; then
+  echo "FAIL SDK check accepted an entry point that ignores SDK options" >&2; exit 1
 fi
-grep -q 'reusing application-owned XPU' "$sdk/embedded.log"
+grep -q 'KFParticle does not provide the requested standalone SDK' "$failure_log"
+echo "PASS kfp-build-registration SDK mode rejects missing SDK support"
+failure_log="$sdk/build.log"
 if ! cmake "${sdk_args[@]}" -B "$sdk/build" \
     >"$sdk/build.log" 2>&1; then
   cat "$sdk/build.log" >&2; exit 1
@@ -453,12 +642,15 @@ endif()
 CMAKE
 consumer_args=(-S "$sdk/consumer" -DCMAKE_PREFIX_PATH="$sdk/relocated;$sdk/deps"
   -DSDK_PREFIX="$sdk/relocated")
+failure_log="$sdk/import.log"
 if ! cmake "${consumer_args[@]}" -B "$sdk/import" >"$sdk/import.log" 2>&1; then
   cat "$sdk/import.log" >&2; exit 1
 fi
+failure_log="$sdk/hip.log"
 if cmake "${consumer_args[@]}" -B "$sdk/hip" -DREQUIRE_HIP=ON >"$sdk/hip.log" 2>&1; then
   echo "FAIL CPU-only SDK advertised HIP" >&2; exit 1
 fi
+failure_log="$sdk/external.log"
 if ! cmake "${sdk_args[@]}" -B "$sdk/external" \
     -DKFPARTICLE_XPU_ROOT="$sdk/installed-xpu" -DCMAKE_INSTALL_PREFIX="$sdk/external-prefix" \
     >"$sdk/external.log" 2>&1; then
@@ -468,17 +660,20 @@ if grep -q 'TYPE SHARED_LIBRARY.*libxpu' "$sdk/external/kfp/cmake_install.cmake"
   echo "FAIL SDK installs another copy of external XPU" >&2; exit 1
 fi
 cmake -P "$sdk/external/fixture-prefix.cmake"
+failure_log="$sdk/external-import.log"
 if ! cmake -S "$sdk/consumer" -B "$sdk/external-import" \
     -DCMAKE_PREFIX_PATH="$sdk/external-prefix;$sdk/deps" \
     -DSDK_PREFIX="$sdk/external-prefix" -DKFPARTICLE_XPU_ROOT="$sdk/installed-xpu" \
     -DEXPECT_EXTERNAL=ON >"$sdk/external-import.log" 2>&1; then
   cat "$sdk/external-import.log" >&2; exit 1
 fi
+failure_log="$sdk/missing-xpu.log"
 if cmake "${sdk_args[@]}" -B "$sdk/missing-xpu" -DKFPARTICLE_XPU_ROOT="$sdk/absent" \
     >"$sdk/missing-xpu.log" 2>&1; then
   echo "FAIL SDK accepted a missing XPU installation" >&2; exit 1
 fi
 grep -q 'XPU headers/library not found' "$sdk/missing-xpu.log"
+failure_log="$sdk/missing-backend.log"
 if cmake "${sdk_args[@]}" -B "$sdk/missing-backend" \
     -DKFPARTICLE_XPU_ROOT="$sdk/installed-xpu" -DXPU_ENABLE_HIP=ON \
     >"$sdk/missing-backend.log" 2>&1; then
@@ -488,6 +683,7 @@ grep -q 'XPU installation has no HIP backend' "$sdk/missing-backend.log"
 mkdir -p "$sdk/rocm/llvm/bin"
 touch "$sdk/rocm/llvm/bin/clang++" \
   "$sdk/installed-xpu/lib64/libxpu_Hip.so" "$sdk/installed-xpu/lib64/libxpu_Hip.dylib"
+failure_log="$sdk/hip-image.log"
 if ! cmake "${sdk_args[@]}" -B "$sdk/hip-image" \
     -DKFPARTICLE_XPU_ROOT="$sdk/installed-xpu" -DXPU_ENABLE_HIP=ON \
     -DXPU_ROCM_ROOT="$sdk/rocm" '-DXPU_HIP_ARCH=gfx906;gfx908' \
@@ -499,4 +695,4 @@ grep -Fq 'set(GPU_TARGETS "gfx906;gfx908")' "$image_source/CMakeLists.txt"
 grep -Fq -- '-std=c++17' "$image_source/CMakeLists.txt"
 grep -Fq "$sdk/installed-xpu/include" "$image_source/includes.cmake"
 grep -Fq 'execution/KFParticleGpuKernels.cxx' "$image_source/kernels.cxx"
-echo "PASS kfp-build-registration parent/installed XPU reuse, SDK ABI, lib64 import and dependency guards"
+echo "PASS kfp-build-registration standalone SDK ABI, relocation, installed XPU and backend guards"

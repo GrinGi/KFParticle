@@ -187,7 +187,7 @@ Alternatively, reuse an already configured, GPU-enabled CBMRoot build:
 export CBM_SOURCE=/path/to/cbmroot
 export CBM_BUILD=/path/to/configured-cbmroot-build
 cmake -S "$CBM_SOURCE" -B "$CBM_BUILD" \
-  -DKFPARTICLE_BUILD_GPU_EXAMPLE=ON -DKFPARTICLE_INSTALL_SDK=OFF
+  -DKFPARTICLE_BUILD_GPU_EXAMPLE=ON
 cmake --build "$CBM_BUILD" --target KFParticleGpuExample --parallel 8
 source "$CBM_BUILD/config.sh"
 export KFP_EXAMPLE="$CBM_BUILD/bin/KFParticleGpuExample"
@@ -232,13 +232,13 @@ Enable the integration in an already configured CBMRoot build:
 export CBM_SOURCE=/path/to/cbmroot
 export CBM_BUILD=/path/to/configured-cbmroot-build
 cmake -S "$CBM_SOURCE" -B "$CBM_BUILD" \
-  -DCBM_KFPARTICLE_USE_XPU=ON -DCBM_KFPARTICLE_GPU_DIAGNOSTICS=ON \
-  -DKFPARTICLE_INSTALL_SDK=OFF
+  -DCBM_KFPARTICLE_USE_XPU=ON -DCBM_KFPARTICLE_GPU_DIAGNOSTICS=ON
 cmake --build "$CBM_BUILD" --target cbmreco CbmRecoTasks --parallel 8
 ```
 
-This build reuses CBMRoot's XPU target; it does not require a second standalone
-XPU installation. Use the normal CBMRoot input/configuration workflow and matching
+This build reuses CBMRoot's XPU target and disables standalone SDK installation
+within the embedded subproject. It does not require a second standalone XPU
+installation. Use the normal CBMRoot input/configuration workflow and matching
 reconstruction parameters. The selector configuration must explicitly specify
 `kfp.selector.doRefitTracks`.
 
@@ -307,6 +307,18 @@ export KFPARTICLE_CBMROOT_DEVICE=hip0
 export KFPARTICLE_CBMROOT_EQUIVALENCE_SKIP_BUILD=1
 bash "$KFP_TEST/cbmroot/run_cbmroot_regression.sh" all
 ```
+
+The CBMRoot build-registration contract checks embedded targets, public ABI
+settings and reuse of CBMRoot's XPU runtime. It does not require an installed
+SDK or SDK package metadata. Standalone SDK export/import checks are separate:
+
+```bash
+bash "$KF_SOURCE/KFParticle/GPU/test/cbmroot/test_kfp_build_registration.sh" sdk
+```
+
+This configuration-only check needs the KFParticle source tree, Bash, CMake
+and a C++ compiler, not CBMRoot or an accelerator. It does not replace compiled
+GPU regression tests.
 
 `run_xpu_tests.sh` provides optional source-tree `lifecycle`, `ctest`, `benchmark`
 and `matrix` modes. Supply the XPU source path and backend options for that
