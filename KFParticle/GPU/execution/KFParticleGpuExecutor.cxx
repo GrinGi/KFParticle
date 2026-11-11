@@ -11,6 +11,7 @@
 #include "planning/KFParticleGpuDecayPlan.h"
 #include "algorithms/KFParticleGpuMath.h"
 #include "diagnostics/KFParticleGpuParity.h"
+#include "diagnostics/KFParticleGpuHostTiming.h"
 #include "execution/KFParticleGpuSteering.h"
 #include "diagnostics/KFParticleGpuStepTrace.h"
 #include "data/KFParticleGpuSoAView.h"
@@ -1050,7 +1051,7 @@ namespace kfparticle::gpu
         result.materializationThreadsUsed = materializationThreadsUsed;
       }
       results.front().materializationMilliseconds = materializationWall;
-      if (settings.inheritEnvironment && performanceMonitoring
+      if (settings.inheritEnvironment && performanceMonitoring && KFParticleGpuReportRequested()
           && outputMode != GpuOutputMode::FullDiagnostics) {
         // Keep machine-readable performance records on the same stream.  When
         // cbmreco redirects stdout and stderr into one log, independently
@@ -1105,7 +1106,7 @@ namespace kfparticle::gpu
       }
       // Print only after closing transaction timers; no per-allocation console IO.
       buffers.PrintAllocationTrace();
-      if (settings.inheritEnvironment && PerformanceMonitoringRequested()) {
+      if (settings.inheritEnvironment && PerformanceMonitoringRequested() && KFParticleGpuReportRequested()) {
         std::fprintf(stderr,
           "KFP_VALIDATION_TIMING contract=1 mode=%s events=%zu packing_ms=%.6f initial_ms=%.6f compact_ms=%.6f\n",
           KFParticleGpuReferenceTransactionValidationRequested() ? "reference" : "optimized",

@@ -7,6 +7,15 @@
 #define KFPARTICLEGPUHOSTTIMING_H
 
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
+
+/** @brief Enable verbose console records only when KFPARTICLE_GPU_REPORT is exactly "1". */
+inline bool KFParticleGpuReportRequested() noexcept
+{
+  const char* value = std::getenv("KFPARTICLE_GPU_REPORT");
+  return value && std::strcmp(value, "1") == 0;
+}
 
 /**
  * @brief Accumulates host-measured durations, allocation counts, and counting-readback bytes.

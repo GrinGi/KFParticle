@@ -255,6 +255,14 @@ event-selection masks rather than a persistent branch containing every particle.
 Offline qualified batches stay within one FairRunAna input entry, so a larger
 batch limit does not combine separate single-event entries.
 
+KFP console output is opt-in; CBMRoot's own timing output is unchanged.
+Set `KFPARTICLE_GPU_PERFORMANCE_MONITORING=1` for the CPU/GPU stage timing table.
+The independent `KFPARTICLE_GPU_REPORT=1` switch enables verbose event/batch,
+routing and policy summaries; with monitoring enabled, it also prints detailed
+performance records. Use monitoring `1` and report `0` for the table alone.
+Errors and warnings remain visible. Integration test launchers explicitly request
+the verbose summaries they validate.
+
 ## Tests
 
 These commands verify correctness and integration; they are not analysis launch

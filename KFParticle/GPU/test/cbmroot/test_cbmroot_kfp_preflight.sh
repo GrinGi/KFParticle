@@ -77,6 +77,14 @@ printf 'diagnostic_contract=\nbatch_limit=\nqualification locked\nadaptive work=
 cat >"${build_dir}/bin/cbmreco" <<'EOF'
 #!/usr/bin/env bash
 mode="config"
+if [[ "${KFPARTICLE_GPU_REPORT:-0}" != 1 ]]; then
+  echo "fixture did not receive the explicit test-report request" >&2
+  exit 1
+fi
+if [[ "${KFPARTICLE_GPU_PERFORMANCE_MONITORING:-0}" != "${KFPARTICLE_TEST_EXPECT_PERFORMANCE_MONITORING:-0}" ]]; then
+  echo "requesting test reports changed performance monitoring" >&2
+  exit 1
+fi
 if [[ "${KFPARTICLE_GPU_RETRY_RESOURCE_BATCHES:-unset}" != "${KFPARTICLE_TEST_EXPECT_RESOURCE_RETRY:-0}" ]]; then
   echo "fixture received an unexpected resource retry mode" >&2
   exit 1
@@ -123,6 +131,14 @@ exit 0
 EOF
 cat >"${build_dir}/bin/root" <<'EOF'
 #!/usr/bin/env bash
+if [[ "${KFPARTICLE_GPU_REPORT:-0}" != 1 ]]; then
+  echo "fixture did not receive the explicit test-report request" >&2
+  exit 1
+fi
+if [[ "${KFPARTICLE_GPU_PERFORMANCE_MONITORING:-0}" != "${KFPARTICLE_TEST_EXPECT_PERFORMANCE_MONITORING:-0}" ]]; then
+  echo "requesting test reports changed performance monitoring" >&2
+  exit 1
+fi
 if [[ "${KFPARTICLE_TEST_ROOT_EARLY_FAILURE:-0}" == "1" ]]; then
   echo "fixture reconstruction failed before completion" >&2
   exit 2
@@ -156,6 +172,7 @@ common_env=(
   KFPARTICLE_CBMROOT_DIAGNOSTIC_SAMPLE_PERIOD=1
   KFPARTICLE_CBMROOT_QUALIFICATION_EXPECTATION=locked
   KFPARTICLE_CBMROOT_EXPECT_QUALIFICATION_BUILD=any
+  KFPARTICLE_GPU_REPORT=0
   KFPARTICLE_GPU_PERFORMANCE_MONITORING=0
   KFPARTICLE_GPU_DEEP_TRACE=0
   KFPARTICLE_GPU_DEEP_TRACE_COMPACT=0

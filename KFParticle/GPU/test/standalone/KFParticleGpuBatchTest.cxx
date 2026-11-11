@@ -2,8 +2,21 @@
    SPDX-License-Identifier: GPL-3.0-only */
 
 #include "KFParticleGpuTestFixture.h"
+#include "diagnostics/KFParticleGpuHostTiming.h"
 
 using namespace kfp_gpu_test;
+
+TEST(KFParticleGpuHostInterfaceTest, PerformanceMonitoringDoesNotRequestVerboseConsoleRecords)
+{
+  ScopedEnvironment monitoring("KFPARTICLE_GPU_PERFORMANCE_MONITORING", "1");
+  ScopedEnvironment report("KFPARTICLE_GPU_REPORT", "");
+  const char* values[] = {nullptr, "", "0", "1", "01", "true"};
+  for (const char* value : values) {
+    if (value) { setenv("KFPARTICLE_GPU_REPORT", value, 1); }
+    else { unsetenv("KFPARTICLE_GPU_REPORT"); }
+    EXPECT_EQ(KFParticleGpuReportRequested(), value && std::string(value) == "1");
+  }
+}
 
 TEST(KFParticleGpuHostInterfaceTest, DefaultBatchLimitsCoverMaximumGraphLineage)
 {

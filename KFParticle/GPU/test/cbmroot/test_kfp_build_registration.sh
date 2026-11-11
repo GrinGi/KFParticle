@@ -108,14 +108,21 @@ cat >"$temporary/CMakeLists.txt" <<'CMAKE'
 cmake_minimum_required(VERSION 3.14)
 project(KfpBuildRegistration LANGUAGES CXX)
 enable_testing()
-foreach(dependency ROOT::Core xpu KFParticle CbmKFParticleOnlineInterface CbmRecoBase)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin")
+foreach(dependency ROOT::Core xpu KFParticle CbmKFParticleOnlineInterface CbmRecoBase
+                   Algo AlgoOffline CbmRecoTasks)
   add_library(${dependency} INTERFACE IMPORTED)
 endforeach()
 if(WITH_GTEST)
+  add_library(GTest::gtest INTERFACE IMPORTED)
   add_library(GTest::gtest_main INTERFACE IMPORTED)
 endif()
 set(KFPARTICLE_USE_XPU ON)
 add_subdirectory("${ADAPTER_DIR}" adapter)
+if(WITH_GTEST)
+  unset(ENV{RAW_DATA_PATH})
+  add_subdirectory("${ADAPTER_DIR}/../../test" selector-tests)
+endif()
 
 get_property(contracts DIRECTORY "${ADAPTER_DIR}" PROPERTY TESTS)
 get_target_property(adapter_sources CbmKfParticleGpuAdapter SOURCES)
@@ -234,6 +241,45 @@ for variant in disabled no-gtest gtest gtest-trial; do
   fi
   echo "PASS kfp-build-registration $variant"
 done
+
+# Exercise the real CTest launch commands without linking ROOT/FairRoot.
+# Configuration-time paths must not replace the environment loaded for testing.
+runtime_fixture="$temporary/gtest"
+mkdir -p "$runtime_fixture/bin"
+cat >"$runtime_fixture/bin/_GTestKfpSelectorPid" <<'BASH'
+#!/usr/bin/env bash
+if [[ "${LD_LIBRARY_PATH-}" != "$KFP_TEST_EXPECTED_LD" ]]; then
+  printf 'FAIL runtime library path: expected=%s actual=%s\n' \
+    "$KFP_TEST_EXPECTED_LD" "${LD_LIBRARY_PATH-}" >&2
+  exit 1
+fi
+exit "${KFP_TEST_EXIT_CODE:-0}"
+BASH
+cp "$runtime_fixture/bin/_GTestKfpSelectorPid" "$runtime_fixture/bin/_GTestKfpGpuAdapter"
+chmod +x "$runtime_fixture/bin/_GTestKfpSelectorPid" "$runtime_fixture/bin/_GTestKfpGpuAdapter"
+runtime_tests='^(_GTestKfpSelectorPid|_GTestKfpGpuAdapter)$'
+for inherited in "$temporary/runtime dependencies:$temporary/other-cbm/lib" ''; do
+  failure_log="$temporary/runtime-path.log"
+  if ! env LD_LIBRARY_PATH="$inherited" \
+      KFP_TEST_EXPECTED_LD="$runtime_fixture/lib${inherited:+:$inherited}" \
+      ctest --test-dir "$runtime_fixture" --output-on-failure --no-tests=error \
+      -R "$runtime_tests" >"$failure_log" 2>&1; then
+    cat "$failure_log" >&2; exit 1
+  fi
+done
+failure_log="$temporary/runtime-unset.log"
+if ! env -u LD_LIBRARY_PATH KFP_TEST_EXPECTED_LD="$runtime_fixture/lib" \
+    ctest --test-dir "$runtime_fixture" --output-on-failure --no-tests=error \
+    -R "$runtime_tests" >"$failure_log" 2>&1; then
+  cat "$failure_log" >&2; exit 1
+fi
+failure_log="$temporary/runtime-failure.log"
+if env -u LD_LIBRARY_PATH KFP_TEST_EXPECTED_LD="$runtime_fixture/lib" KFP_TEST_EXIT_CODE=9 \
+    ctest --test-dir "$runtime_fixture" --output-on-failure --no-tests=error \
+    -R "$runtime_tests" >"$failure_log" 2>&1; then
+  echo "FAIL CTest launcher hid a test failure" >&2; exit 1
+fi
+echo "PASS kfp-build-registration test-time library paths and failure propagation"
 
 # Dispatch tests are hermetic: fake build tools must never run in --run-only.
 mkdir -p "$temporary/dispatch/bin" "$temporary/dispatch/lib" "$temporary/tools" "$temporary/xpu"
