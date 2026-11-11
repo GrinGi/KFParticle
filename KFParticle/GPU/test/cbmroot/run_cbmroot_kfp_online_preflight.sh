@@ -318,6 +318,7 @@ for ((run_index = 1; run_index <= repeat; ++run_index)); do
     KFPARTICLE_GPU_DEEP_TRACE="${deep_trace}" \
     KFPARTICLE_GPU_DEEP_TRACE_COMPACT="${deep_trace_compact}" \
     KFPARTICLE_CPU_FINDER_TRACE_PAIRS="${cpu_finder_trace_pairs}" \
+    KFPARTICLE_GPU_REPORT=1 \
     KFPARTICLE_GPU_PERFORMANCE_MONITORING="${performance_monitoring}" \
     KFPARTICLE_GPU_MATERIALIZATION_SCHEDULE="${materialization_schedule}" \
     KFPARTICLE_GPU_TRANSACTION_DIAGNOSTICS="${transaction_diagnostics}" \

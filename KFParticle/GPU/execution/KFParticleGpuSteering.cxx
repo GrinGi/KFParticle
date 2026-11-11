@@ -20,6 +20,7 @@
 #endif
 
 #include "execution/KFParticleGpuBufferManager.h"
+#include "diagnostics/KFParticleGpuHostTiming.h"
 #include "planning/KFParticleGpuDecayGraphPlan.h"
 #include "planning/KFParticleGpuDecayPlan.h"
 #include "execution/KFParticleGpuKernels.h"
@@ -2067,7 +2068,7 @@ const std::vector<KFParticleGpuTwoDaughterChannelResult>& KFParticleGpuSteering:
           fImpl->fBuffers->DeviceTransaction(), evaluateSelection);
       }
       constructionTrace.Next("CPU construction monitoring");
-      if (fImpl->fPerformanceMonitoringEnabled) {
+      if (fImpl->fPerformanceMonitoringEnabled && KFParticleGpuReportRequested()) {
         std::fprintf(stdout,
           "KFP_CONSTRUCTION_MAP contract=1 compact=%u tiles=%zu lanes=%llu reference_lanes=%u upload_bytes=%zu\n",
           compactTransactionOutput && compactConstruction ? 1u : 0u,

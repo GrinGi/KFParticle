@@ -217,6 +217,7 @@ for ((run_index = 1; run_index <= repeat; ++run_index)); do
     XPU_DEVICE="${KFP_PREFLIGHT_DEVICE}" \
     CBM_CA_XPU_DEVICE="${KFP_PREFLIGHT_DEVICE}" \
     CBM_CA_TRACKING_BACKEND="${backend}" \
+    KFPARTICLE_GPU_REPORT=1 \
     KFPARTICLE_GPU_PERFORMANCE_MONITORING="${performance_monitoring}" \
     "${command[@]}" >"${log_file}" 2>&1; then
     :
