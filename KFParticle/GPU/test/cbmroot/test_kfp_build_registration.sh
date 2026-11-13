@@ -31,7 +31,9 @@ if [[ ! -r "$adapter_dir/CMakeLists.txt" || ! -r "$source_dir/external/InstallKF
   echo "FAIL cbmroot mode requires a CBMRoot checkout; use sdk for standalone package checks" >&2
   exit 2
 fi
-for retired in KfpGpuMaterializationAdapter.h KfpGpuMaterializationAdapter.cxx \
+for retired in KfpGpuQualifiedBatch.h KfpGpuQualifiedBatch.cxx \
+    KfpGpuReferenceCollector.h KfpGpuReferenceCollector.cxx \
+    KfpGpuMaterializationAdapter.h KfpGpuMaterializationAdapter.cxx \
     KfpGpuDiagnosticStatus.h KfpGpuBatchPolicy.h KfpGpuBatchPolicy.cxx \
     KfpGpuPerformanceReport.h KfpGpuPerformanceReport.cxx \
     KfpGpuInputPacker.h KfpGpuInputPacker.cxx KfpGpuBatch.h KfpGpuBatch.cxx \
@@ -90,8 +92,7 @@ if grep -Eq 'GpuBatch(Action|Decision|PolicyProfile)|GpuRouter' \
 fi
 echo "PASS kfp-build-registration common execution has no CBMRoot dependency"
 
-for source in "$adapter_dir/KfpGpuQualifiedBatch.cxx" \
-    "$adapter_dir/KfpGpuReferenceCollector.cxx" \
+for source in "$adapter_dir/KfpGpuAdapter.cxx" \
     "$source_dir/algo/kfp/selector/KfpSelector.cxx" \
     "$source_dir/algo/global/Reco.cxx" "$source_dir/reco/tasks/CbmTaskKfpSelector.cxx"; do
   if grep -Eq 'GpuExecutor[[:space:]]*\(|GpuExecutor[[:space:]]+[[:alnum:]_]+|GpuRuntimeService::Instance' "$source"; then
@@ -109,7 +110,7 @@ cmake_minimum_required(VERSION 3.14)
 project(KfpBuildRegistration LANGUAGES CXX)
 enable_testing()
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin")
-foreach(dependency ROOT::Core xpu KFParticle CbmKFParticleOnlineInterface CbmRecoBase
+foreach(dependency ROOT::Core xpu KFParticle CbmKFParticleOnlineInterface CbmRecoBase CbmUtility Boost::headers
                    Algo AlgoOffline CbmRecoTasks)
   add_library(${dependency} INTERFACE IMPORTED)
 endforeach()
@@ -127,6 +128,12 @@ endif()
 get_property(contracts DIRECTORY "${ADAPTER_DIR}" PROPERTY TESTS)
 get_target_property(adapter_sources CbmKfParticleGpuAdapter SOURCES)
 get_target_property(adapter_definitions CbmKfParticleGpuAdapter COMPILE_DEFINITIONS)
+get_target_property(adapter_links CbmKfParticleGpuAdapter LINK_LIBRARIES)
+foreach(dependency CbmUtility Boost::headers)
+  if(NOT dependency IN_LIST adapter_links)
+    message(FATAL_ERROR "adapter configuration dependency is missing: ${dependency}")
+  endif()
+endforeach()
 if(NOT "CBM_KFPARTICLE_GPU_DIAGNOSTICS" IN_LIST adapter_definitions)
   message(FATAL_ERROR "legacy GPU adapter build interface is missing")
 endif()
@@ -137,7 +144,7 @@ if(CBM_KFPARTICLE_GPU_QUALIFICATION_TRIAL)
 elseif("CBM_KFPARTICLE_GPU_QUALIFICATION_TRIAL" IN_LIST adapter_definitions)
   message(FATAL_ERROR "ordinary build unexpectedly unlocks qualification")
 endif()
-foreach(component ReferenceCollector Comparison QualifiedBatch Report Trace Routing)
+foreach(component Adapter Comparison Report Trace Routing)
   if(NOT "KfpGpu${component}.cxx" IN_LIST adapter_sources)
     message(FATAL_ERROR "adapter implementation is missing: ${component}")
   endif()

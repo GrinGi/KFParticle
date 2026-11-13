@@ -13,11 +13,11 @@
 
 #include "CbmXpu.h"
 #include "algo/kfp/gpu/KfpGpuComparison.h"
+#include "algo/kfp/gpu/KfpGpuAdapter.h"
 #include "execution/KFParticleGpuExecutor.h"
 #include "execution/KFParticleGpuFinder.h"
 #include "data/KFParticleGpuInputPacker.h"
 #include "execution/KFParticleGpuRuntimeService.h"
-#include "algo/kfp/gpu/KfpGpuQualifiedBatch.h"
 #include "KFParticleFinder.h"
 #include "planning/KFParticleGpuCpuChannelCatalogue.h"
 #include "planning/KFParticleGpuDecayPlan.h"
@@ -177,6 +177,16 @@ namespace
     reconstructor.AddPV(vertex);
     reconstructor.SortTracks();
     reconstructor.ReconstructParticles();
+
+    // Validate the extracted diagnostic bridge while the CPU's sorted state is alive.
+    // Two slots keep this single observation queued, without another GPU execution.
+    cbm::algo::kfp::GpuAdapter collector(
+      ::kfparticle::gpu::DefaultGpuBatchLimits(2u), {motherPdg});
+    const auto completed = collector.SubmitCpuReference(
+      0u, first, last, std::vector<float>(first.Size(), 25.f), {vertex}, reconstructor,
+      0., finder->GetChiPrimaryCut2D());
+    Require(completed.empty() && !collector.Empty(),
+            "CPU reference bridge did not retain the completed CPU event");
     return reconstructor.GetParticles();
   }
 
@@ -563,6 +573,18 @@ namespace
                           return particle.GetPDG() == 310;
                         }),
             "publishable-output GPU execution lost the K0S result");
+
+    if (cbm::algo::kfp::GpuQualificationUnlocked()) {
+      cbm::algo::kfp::GpuAdapter executor(
+        ::kfparticle::gpu::DefaultGpuBatchLimits(1u), {310}, {});
+      const auto admitted = executor.ExecuteEvent(
+        {909u, first, last, chiToPrimaryVertex, primaryVertices}, true);
+      Require(admitted.has_value(), "qualified single-event adapter rejected the supported request");
+      Require(admitted->sourceEventId == 909u,
+              "qualified single-event adapter changed the source event ID");
+      Require(cbm::algo::kfp::RecordGpuPublication(*admitted).publishGpu,
+              "qualified single-event adapter did not produce a publishable event");
+    }
 
     std::cout << "PASS cbmroot-gpu-publishable-output"
               << " - accepted particles materialized without CPU reference or full diagnostics"
