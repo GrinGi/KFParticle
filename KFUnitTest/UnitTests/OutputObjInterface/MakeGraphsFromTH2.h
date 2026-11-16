@@ -25,7 +25,11 @@ TGraphErrors* MakeMeanGraphFromTH2(T fHisto2D)
     y[ibin - 1]       = fProjHisto2D->GetMean();
     yerr[ibin - 1]    = fProjHisto2D->GetMeanError();
   }
-  TGraphErrors* fGraphOut = new TGraphErrors(num_of_bins, x, y, xerr, yerr);
+  TGraphErrors* fGraphOut = new TGraphErrors(num_of_bins);
+  for (int graphPoint = 0; graphPoint < num_of_bins; ++graphPoint) {
+    fGraphOut->SetPoint(graphPoint, x[graphPoint], y[graphPoint]);
+    fGraphOut->SetPointError(graphPoint, xerr[graphPoint], yerr[graphPoint]);
+  };
   return fGraphOut;
 }
 

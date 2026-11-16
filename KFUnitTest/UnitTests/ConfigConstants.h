@@ -1,10 +1,7 @@
+#include <array>
+#include "TString.h"
 #pragma once
 
-#include <TROOT.h>
-#include <TString.h>
-#include <TSystem.h>
-
-#include <array>
 #include <vector>
 
 // header file with function std::vector<float> MakeCovMatrix(const
@@ -27,7 +24,7 @@
 // inside AliPhysics
 
 //#define CASCADES // for cascades - will be done later.... (?)
-
+#define HomogeneousField
 // const int NUM_OF_DAUGHTERS = 2;
 // const int NUM_OF_MOTHERS = 1;
 // const int NUM_OF_DECAYS = NUM_OF_MOTHERS;
@@ -75,8 +72,9 @@ const bool SET_TOPOLOGICAL_CONSTRAINT_DAUGHTERS = true;  //
 
 // Settings of input and output files
 // File with MC data and names of trees
-const TString MCInputFile =
-  "../MCData/Xi_cascade/Xi_to_Lambda0_to_Piminus_P_output.root";  //"../MCData/D0_to_Kminus_Piplus/D0_to_Kminus_Piplus_output.root";
+const TString MCInputFile = "../MCData/Lambda0_to_Piminus_P/Lambda0_to_Piminus_P.root";
+//../MCData/Xi_cascade/Xi_cascade.root";
+//"../MCData/D0_to_Kminus_Piplus/D0_to_Kminus_Piplus.root";
 const TString nameOfMCTree       = "Events";
 const TString nameOfMagFieldTree = "MagField";
 // Name of output file with KFParticles and MC output trees

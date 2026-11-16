@@ -57,7 +57,7 @@ void MakeKFParticleTreesForRootInteractive()
     float xyz[3] = {0, 0, 0};
     float B[3];
     KFParticle p;
-    p.GetFieldValue(xyz, B);
+//    p.GetFieldValue(xyz, B);
     std::cout << "Field is set to " << B[0] << " " << B[1] << " " << B[2] << " kilogaus" << std::endl;
   }
 

@@ -48,13 +48,13 @@ void MakeKFParticleTrees()
             << "   tesla" << std::endl;
 
   // check the field
-  KFParticle::SetField(magField[2] * 10);  // Bz, *10 to convert tesla to kgauss
+  //KFParticle::SetField(magField[2] * 10);  // Bz, *10 to convert tesla to kgauss
   {
-    float xyz[3] = {0, 0, 0};
-    float B[3];
-    KFParticle p;
-    p.GetFieldValue(xyz, B);
-    std::cout << "Field is set to " << B[0] << " " << B[1] << " " << B[2] << " kilogaus" << std::endl;
+//    float xyz[3] = {0, 0, 0};
+  //  float B[3];
+   // KFParticle p;
+   // p.GetFieldValue(xyz, B);
+   // std::cout << "Field is set to " << B[0] << " " << B[1] << " " << B[2] << " kilogaus" << std::endl;
   }
 
   ///////////////////////////////////////////////////////
@@ -712,6 +712,7 @@ void MakeKFParticleTrees()
 
     float testCovMat[36];
     bool testmode = true;
+    bool is_silent = true;
 
     for (int iDecay = 0; iDecay < NUM_OF_DECAYS; iDecay++) {
       /// Create KFParticles from MCParticleStructs
@@ -729,7 +730,7 @@ void MakeKFParticleTrees()
 
       if (testmode) {
         for (int idx = 0; idx < 36; idx++) { testCovMat[idx] = mother_KF[iDecay].GetCovariance(idx); }
-        CheckCovMat(testCovMat, stats, false);
+        CheckCovMat(testCovMat, stats, is_silent);
       }
 
       for (int i = 0; i < daughter_counter[iDecay]; i++) {
@@ -746,14 +747,14 @@ void MakeKFParticleTrees()
 #ifdef TESTSUITE
         daughters_KF[iDecay][i].Initialize(params_D, covmat_D, charge_, chi2_, ndf_, mass_);
 #else
-        daughters_KF[iDecay][i].Initialize(params_D, covmat_D, charge_, mass_);
+        daughters_KF[iDecay][i].Create(params_D, covmat_D, charge_, mass_);
 #endif
         daughters_KF[iDecay][i].SetId(daughters_MC[iDecay][i].trackID);
         daughters_KF[iDecay][i].SetPDG(daughters_MC[iDecay][i].pdg);
 
         if (testmode) {
           for (int idx = 0; idx < 36; idx++) { testCovMat[idx] = daughters_KF[iDecay][i].GetCovariance(idx); }
-          CheckCovMat(testCovMat, stats, false);
+          CheckCovMat(testCovMat, stats, is_silent);
         }
       }
 
@@ -763,13 +764,12 @@ void MakeKFParticleTrees()
       bool isDecomposedOK = true;
       for (auto& part : daughters_KF[iDecay]) {
         isDecomposedOK = SmearParticle(part);
-        std::cout << isDecomposedOK << " isDecomposedOK" << std::endl;
         mother_KF[iDecay].AddDaughter(part);
       }
 
       if (testmode) {
         for (int idx = 0; idx < 36; idx++) { testCovMat[idx] = mother_KF[iDecay].GetCovariance(idx); }
-        CheckCovMat(testCovMat, stats, false);
+        CheckCovMat(testCovMat, stats, is_silent);
       }
 
       if (SET_TOPOLOGICAL_CONSTRAINT_MOTHER) {
@@ -797,7 +797,7 @@ void MakeKFParticleTrees()
 
         if (testmode) {
           for (int idx = 0; idx < 36; idx++) { testCovMat[idx] = mother_KF[iDecay].GetCovariance(idx); }
-          CheckCovMat(testCovMat, stats, false);
+          CheckCovMat(testCovMat, stats, is_silent);
         }
       }
 
@@ -807,7 +807,7 @@ void MakeKFParticleTrees()
 
       if (testmode) {
         for (int idx = 0; idx < 36; idx++) { testCovMat[idx] = mother_KF[iDecay].GetCovariance(idx); }
-        CheckCovMat(testCovMat, stats, false);
+        CheckCovMat(testCovMat, stats, is_silent);
       }
 
       // Fill KFProductionVertex tree
@@ -927,7 +927,7 @@ void MakeKFParticleTrees()
 
       if (testmode) {
         for (int idx = 0; idx < 36; idx++) { testCovMat[idx] = mother_KF[iDecay].GetCovariance(idx); }
-        CheckCovMat(testCovMat, stats, false);
+        CheckCovMat(testCovMat, stats, is_silent);
       }
 
       //if (SET_MASS_CONSTRAINT_MOTHER)
@@ -935,7 +935,7 @@ void MakeKFParticleTrees()
 
       if (testmode) {
         for (int idx = 0; idx < 36; idx++) { testCovMat[idx] = mother_KF[iDecay].GetCovariance(idx); }
-        CheckCovMat(testCovMat, stats, false);
+        CheckCovMat(testCovMat, stats, is_silent);
       }
 
       if (SET_TOPOLOGICAL_CONSTRAINT_DAUGHTERS) {
@@ -949,7 +949,7 @@ void MakeKFParticleTrees()
       if (testmode) {
         for (int i = 0; i < daughter_counter[iDecay]; i++) {
           for (int idx = 0; idx < 36; idx++) { testCovMat[idx] = daughters_KF[iDecay][i].GetCovariance(idx); }
-          CheckCovMat(testCovMat, stats, false);
+          CheckCovMat(testCovMat, stats, is_silent);
         }
       }
 

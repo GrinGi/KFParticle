@@ -3,7 +3,8 @@
 #include "../ConfigConstants.h"
 #include "MakeGraphsFromTH2.h"
 #include "OutputObjInterface.h"
-
+#include "TCanvas.h"
+#include "TH2.h"
 #include <array>
 
 class PullPtDepHistos : public OutputObjInterface {

@@ -177,7 +177,7 @@ void TransportMethodCheck::Fill(int iDecay, const MCParticleStruct& mcPart)
 #ifdef TESTSUITE
   kfPart.Initialize(params, covmat, charge_, chi2_, ndf_, mass_);
 #else
-  kfPart.Initialize(params, covmat, charge_, mass_);
+  kfPart.Create(params, covmat, charge_, mass_);
 #endif
   kfPart.SetId(mcPart.trackID);
   kfPart.SetPDG(mcPart.pdg);

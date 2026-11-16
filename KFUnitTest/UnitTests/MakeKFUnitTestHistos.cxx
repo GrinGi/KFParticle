@@ -3,7 +3,9 @@
 #include "OutputObjInterface/MakeGraphsFromTH2.h"
 #include "OutputObjInterface/OutputMap.h"
 #include "TDirectory.h"
+#include "TH1.h"
 
+#include <iostream>
 #include <algorithm>
 
 /////
@@ -669,7 +671,7 @@ void MakeKFUnitTestHistos()
   for (int iDecay = 0; iDecay < NUM_OF_DECAYS; iDecay++) {
     chainMCInitial[iDecay] = new TChain(nameOfMCInitialOutputTree[iDecay]);
 
-    std::cout << "KFInputFile: " << KFInputFile << std::endl;
+
     chainMCInitial[iDecay]->Add(KFInputFile);
 
     chainMCInitial[iDecay]->SetBranchAddress("nTracks", &nTracks_MCInitial[iDecay]);
@@ -742,7 +744,6 @@ void MakeKFUnitTestHistos()
   for (int iDecay = 0; iDecay < NUM_OF_DECAYS; iDecay++) {
     chainMCFinal[iDecay] = new TChain(nameOfMCFinalOutputTree[iDecay]);
 
-    std::cout << "KFInputFile: " << KFInputFile << std::endl;
     chainMCFinal[iDecay]->Add(KFInputFile);
 
     chainMCFinal[iDecay]->SetBranchAddress("nTracks", &nTracks_MCFinal[iDecay]);
@@ -840,7 +841,6 @@ void MakeKFUnitTestHistos()
   for (int iDecay = 0; iDecay < NUM_OF_DECAYS; iDecay++) {
     chainKFProductionVertex[iDecay] = new TChain(nameOfKFProductionVertexTree[iDecay]);
 
-    std::cout << "KFInputFile: " << KFInputFile << std::endl;
     chainKFProductionVertex[iDecay]->Add(KFInputFile);
 
     chainKFProductionVertex[iDecay]->SetBranchAddress("nTracks", &nTracks_KFProductionVertex[iDecay]);
@@ -1539,7 +1539,7 @@ void MakeKFUnitTestHistos()
         kfpart_decay.s          = s_KFDecayVertex[iDecay][iTrack];
         kfpart_decay.charge     = charge_KFDecayVertex[iDecay][iTrack];
         kfpart_decay.chi2       = chi2_KFDecayVertex[iDecay][iTrack];
-        kfpart_decay.ndf - ndf_KFDecayVertex[iDecay][iTrack];
+        kfpart_decay.ndf = ndf_KFDecayVertex[iDecay][iTrack];
         kfpart_decay.massHypo = massHypo_KFDecayVertex[iDecay][iTrack];
 
         kfpart_decay.isMother   = isMother_KFDecayVertex[iDecay][iTrack];
@@ -1591,8 +1591,8 @@ void MakeKFUnitTestHistos()
         kfpart_production.s          = s_KFProductionVertex[iDecay][iTrack];
         kfpart_production.charge     = charge_KFProductionVertex[iDecay][iTrack];
         kfpart_production.chi2       = chi2_KFProductionVertex[iDecay][iTrack];
-        kfpart_production.ndf - ndf_KFProductionVertex[iDecay][iTrack];
-        kfpart_production.massHypo = massHypo_KFProductionVertex[iDecay][iTrack];
+        kfpart_production.ndf        = ndf_KFProductionVertex[iDecay][iTrack];
+        kfpart_production.massHypo   = massHypo_KFProductionVertex[iDecay][iTrack];
 
         kfpart_production.isMother   = isMother_KFProductionVertex[iDecay][iTrack];
         kfpart_production.isDaughter = isDaughter_KFProductionVertex[iDecay][iTrack];
@@ -1645,6 +1645,30 @@ void MakeKFUnitTestHistos()
   ////
 
   output_map.PreWriteProcessAll();
+
+  // Report sums of bin contents; for unweighted fills these are entry counts.
+  const auto printMassRangeSummary = [](const TH1* hist) {
+    const int nBins = hist->GetNbinsX();
+    const double inside = hist->Integral(1, nBins);
+    const double below = hist->GetBinContent(0);
+    const double above = hist->GetBinContent(nBins + 1);
+    const double outside = below + above;
+    const double total = inside + outside;
+    std::cout << "[Mass] " << hist->GetName()
+              << " range=[" << hist->GetXaxis()->GetXmin()
+              << ", " << hist->GetXaxis()->GetXmax() << ") GeV"
+              << " inside=" << inside
+              << " underflow=" << below
+              << " overflow=" << above
+              << " outside=" << outside
+              << " (" << (total != 0. ? 100. * outside / total : 0.) << "%)"
+              << " total=" << total << '\n';
+  };
+
+
+
+
+
 
   /////////
   //  write all the stuff into output file
@@ -1738,6 +1762,7 @@ void MakeKFUnitTestHistos()
     fHistPMotherKFProductionVertex[iDecay]->Write();
     fHistEMotherKFProductionVertex[iDecay]->Write();
     fHistMassMotherKFProductionVertex[iDecay]->Write();
+    printMassRangeSummary(fHistMassMotherKFProductionVertex[iDecay]);
     fHistEtaMotherKFProductionVertex[iDecay]->Write();
     fHistPhiMotherKFProductionVertex[iDecay]->Write();
     fHistChi2MotherKFProductionVertex[iDecay]->Write();
@@ -1758,6 +1783,7 @@ void MakeKFUnitTestHistos()
       fHistPDaughterKFProductionVertex[iDecay][i]->Write();
       fHistEDaughterKFProductionVertex[iDecay][i]->Write();
       fHistMassDaughterKFProductionVertex[iDecay][i]->Write();
+      printMassRangeSummary(fHistMassDaughterKFProductionVertex[iDecay][i]);
       fHistEtaDaughterKFProductionVertex[iDecay][i]->Write();
       fHistPhiDaughterKFProductionVertex[iDecay][i]->Write();
       fHistChi2DaughterKFProductionVertex[iDecay][i]->Write();
@@ -1778,6 +1804,7 @@ void MakeKFUnitTestHistos()
     fHistPMotherKFDecayVertex[iDecay]->Write();
     fHistEMotherKFDecayVertex[iDecay]->Write();
     fHistMassMotherKFDecayVertex[iDecay]->Write();
+    printMassRangeSummary(fHistMassMotherKFDecayVertex[iDecay]);
     fHistEtaMotherKFDecayVertex[iDecay]->Write();
     fHistPhiMotherKFDecayVertex[iDecay]->Write();
     fHistChi2MotherKFDecayVertex[iDecay]->Write();
@@ -1798,6 +1825,7 @@ void MakeKFUnitTestHistos()
       fHistPDaughterKFDecayVertex[iDecay][i]->Write();
       fHistEDaughterKFDecayVertex[iDecay][i]->Write();
       fHistMassDaughterKFDecayVertex[iDecay][i]->Write();
+      printMassRangeSummary(fHistMassDaughterKFDecayVertex[iDecay][i]);
       fHistEtaDaughterKFDecayVertex[iDecay][i]->Write();
       fHistPhiDaughterKFDecayVertex[iDecay][i]->Write();
       fHistChi2DaughterKFDecayVertex[iDecay][i]->Write();

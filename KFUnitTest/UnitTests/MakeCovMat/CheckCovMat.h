@@ -12,6 +12,9 @@ struct CovMatrixCheckStats {
   int cauchy_schwarz_violations  = 0;
   int fixed_cauchy_schwarz_count = 0;
 
+  unsigned long long psd_checked_count = 0;
+  unsigned long long psd_failed_count = 0;
+
   void PrintSummary(bool fixed = false) const
   {
     std::cout << "\n=== Covariance Matrix Check Summary ===\n";
@@ -21,6 +24,11 @@ struct CovMatrixCheckStats {
 
     std::cout << "→ Cauchy-Schwarz violations: " << cauchy_schwarz_violations;
     if (fixed) { std::cout << " | Fixed: " << fixed_cauchy_schwarz_count; }
+    std::cout << "\n";
+    std::cout << "→ Cholesky checks failed (after optional fixes): "
+              << psd_failed_count << " / " << psd_checked_count
+              << " (" << (psd_checked_count ? 100. * psd_failed_count / psd_checked_count : 0.)
+              << "%)\n";
     std::cout << "\n";
     std::cout << "=======================================\n";
   }
@@ -106,9 +114,12 @@ bool CheckCovMat(T (&matrix)[l], CovMatrixCheckStats& stats, bool silent_mode = 
       }
     }
 
+    ++stats.psd_checked_count;
+
     // Attempt Cholesky decomposition
     Eigen::LLT<Eigen::MatrixXf> llt(full_cov);
     if (llt.info() != Eigen::Success) {
+    ++stats.psd_failed_count;
       if (!silent_mode) {
         std::cout << "Warning! Full covariance matrix is not positive "
                      "semi-definite (PSD). Cholesky decomposition failed.\n";

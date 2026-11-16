@@ -1,68 +1,121 @@
 # KFUnitTest
-[KFUnitTest](https://github.com/vsandul/KFUnitTest) is an instrument to check correctness of [KFParticle package](https://github.com/Ivan-Kisel/KFParticle) performance. 
 
-To use this package, [KFParticle package](https://github.com/Ivan-Kisel/KFParticle) and [ROOT](https://root.cern/) are neccessary.
+[KFUnitTest] is a framework for evaluating the reconstruction performance of the [KFParticle package](https://github.com/KFParticleGroup) using Monte Carlo data. It produces ROOT trees, QA histograms, and optional interactive plots for inspecting reconstructed particle quantities, pulls, and residuals.
 
-*Despite it is called **KFUnitTest**, actually the package is more of an integration test.*
+KFUnitTest is primarily an integration test. The generated plots must be inspected to assess reconstruction quality; producing output files alone does not establish that the test has passed.
 
-# Instructions to install
-## ROOT installation
-The present version of the **KFUnitTest** package has been developed and tested within **ROOT v.6.26.04**. Proper work for earlier versions of **ROOT** is not guaranteed.
-To install the **ROOT** follow the instruction in [this link](https://root.cern/install/).
+## Requirements
 
-## KFParticle installation
-1. Download the neccessary branch of **KFParticle** from one of the repositories to folder `<path-to-your-KF-folder/your-KF-folder>`
-1. Go to `<your-KF-folder>` and build the package via 
-        
+- [ROOT](https://root.cern/). The documented development and test environment uses **ROOT 6.26.04**. Compatibility with other versions is not established here.
+- [KFParticle](https://github.com/KFParticleGroup), built from the branch you want to test.
+- CMake, Make, and a C++ compiler compatible with your ROOT and KFParticle installations.
+- [Geant4](https://geant4.web.cern.ch/) only if you want to generate your own Monte Carlo datasets.
+- [RootInteractive](https://pypi.org/project/RootInteractive/) only if you want to generate interactive plots.
+
+## Installation
+
+### 1. Install ROOT
+
+Follow the [ROOT installation instructions](https://root.cern/install/) and activate the ROOT environment for your installation before proceeding.
+
+### 2. Build and install KFParticle
+
+ Download the neccessary branch of **KFParticle** from one of the repositories to folder `<path-to-your-KF-folder/your-KF-folder>`
+ Go to `<your-KF-folder>` and build the package via
+
         $ cd your-KF-folder
         $ mkdir build
         $ cd build
-        $ cmake ..
-        $ make
+        $ cmake .. -DCMAKE_INSTALL_PREFIX=<path-to-your-KF-folder>/install
+        $ make -j
+        $ make install
 
-1. Install KFParticle into <install> directory
-        
-        $ cd ..
-        $ mkdir install
-        $ make DESTDIR=<path-to-your-KF-folder>/install install
+Run the configuration, build, and installation commands from the **build directory**. `CMAKE_INSTALL_PREFIX` specifies where KFParticle will be installed, and `make -j` builds it in parallel.
 
-1. Point the install directory as the directory containing libraries and headers of KFParticle. You have to do this in every used terminal, otherwise just put this line into `~/.bashrc` file.
-        
-        $ export KFPARTICLE_DIR=<path-to-your-KF-folder>/install
-        
-## KFUnitTest installation
-1. Download **KFnitTest** from [the repository](https://github.com/vsandul/KFUnitTest)
-1. * Download the MC dataset you are interested in: for this go to subfolder `<MCData/name-of-dataset>` and execute bashscript `download-data-name-of-dataset.sh`;
-   * Or download GEANT4 programs and create your own dataset: go to `<GeantPrograms/>` subfolder and execute bashscript `download-program-name-of-dataset.sh` ([GEANT4](https://geant4.web.cern.ch/) is required); after build and execute the GEANT4 program (see `README.md` inside of `GeantPrograms` folder).
+After installation, set `KFPARTICLE_DIR` to the same installation prefix so that KFUnitTest can locate the KFParticle headers and libraries:
 
-# Configuring KFUnitTest
-The main configuration file to configure the workflow of the unit test is the `ConfigConstants.h` in the `<UnitTests>` folder. Here you can define version of KFParticle you use, options of reconstruction (modes and constraints), PDG checks and names of input and output files.
-
-# Running KFUnitTest
-Before running KFUnitTest, be sure you have downloaded or generated Monte-Carlo datasets (see **KFUnitTest installation** paragraph) and set right option in the `ConfigConstants.h` file (see **Configuring KFUnitTest** paragraph).
-
-The main unit test macro is in the `<UnitTests>` and calls `RunKFUnitTestMacro`. To perform the unit test, run this macro with **ROOT**:
 ```bash
-$ root RunKFUnitTestMacro.cxx
+export KFPARTICLE_DIR="<path-to-your-KF-folder>/KFParticle/"
 ```
-The result of this macro work are 2 `.root` files: `outputKFTrees_<data>.root` and `outputKFHistos_<data>.root`. The first one is the file with trees of `KFParticle` structures - before and after reconstruction (KFBR and KFAR). The second file is the file with QA plots and histograms, i.e. pulls and residuals of quanitites of reconstructed particles. This plots and histograms have to be analyzed by user to get a judgement about the quality of the **KFParticle** package performance.
 
-# Interactive KFUnitTest
-The other way to make a quality analisys is to use Interactive KFUnitTest. To use this ability, [RootInteractive](https://pypi.org/project/RootInteractive/) has to be installed.
-To perform Interactive KFUnitTest, one may install KFUnitTest, download or generate Monte-Carlo data and configure the test with `ConfigConstants.h` file, then go to folder `<InteractiveTest>` and run `CreateInteractiveTest.cxx` script with **ROOT**:
+Set this variable in every terminal used to run KFUnitTest, or add the export command with your actual path to `~/.bashrc` if you use Bash.
+
+### 3. Download KFUnitTest
+
+### 4. (OPTIONAL) Prepare Monte Carlo data
+
+Choose one of the following options:
+
+- **Use an existing dataset.** Go to `MCData/<dataset-name>/` and run the corresponding `download-data-<dataset-name>.sh` script with Bash.
+- **Generate your own dataset.** Install Geant4, go to `GeantPrograms/`, and run the corresponding `download-program-<dataset-name>.sh` script. Then build and run the downloaded program as described in `GeantPrograms/README.md`.
+
+Replace `<dataset-name>` with the name of an available dataset. Run each download script from its containing directory.
+
+## Configuration
+
+Edit `UnitTests/ConfigConstants.h` before running a test. This file controls:
+
+- The KFParticle version used by the test.
+- Reconstruction modes and constraints.
+- PDG checks.
+- Input and output file names.
+
+Ensure that the selected options match your KFParticle build and that the input paths point to the downloaded or generated Monte Carlo data.
+
+## Running the test
+
+With ROOT configured, `KFPARTICLE_DIR` set, and Monte Carlo data available, run the main macro from `UnitTests/`:
+
 ```bash
-$ root CreateInteractiveTest.cxx
+# From the KFUnitTest repository root:
+cd UnitTests
+root RunKFUnitTestMacro.cxx
 ```
-The result of the script work is 2 `.html` files: `InterTest_pulls.html` and `InterTest_residuals.html` with pulls and residuals plots of particles respectively. This files could be opened with any web-browser.
 
-# Extra KFUnitTest settings
-## Additional histograms and plots
-To provide user with the ability to add his/her own histograms, `OutputObjInterface` was written.
-Shortly, user has to write his/her own class inherited from `OutputObjInterface` class (in the `<UnitTests/OutputObjInterface>` folder); then put the instance of the created class into `OutputMap` structure (`OutputMap.h` file).
-More detailed for more detailed example you can find `ExampleOutput.h` file in the `<UnitTests/OutputObjInterface>` folder. Don't foreget to add your class object into `OutputMap.h`! (as it is done for example).
+The macro produces two ROOT files, with names determined by the configuration:
 
-## Covariance matrix generation
+| Output file | Contents |
+| --- | --- |
+| `outputKFTrees_<data>.root` | Trees containing KFParticle structures before reconstruction (KFBR) and after reconstruction (KFAR). |
+| `outputKFHistos_<data>.root` | QA histograms and plots, including pulls and residuals of reconstructed particle quantities. |
 
-# KFUnitTest workflow
+Inspect these outputs to evaluate the reconstruction performance of the KFParticle version under test.
 
+## Interactive analysis
 
+Install [RootInteractive](https://pypi.org/project/RootInteractive/) in the environment used for interactive analysis. Prepare the Monte Carlo data and configure `UnitTests/ConfigConstants.h` as described above.
+
+Run the interactive macro from `InteractiveTest/`:
+
+```bash
+# From the KFUnitTest repository root:
+cd InteractiveTest
+root CreateInteractiveTest.cxx
+```
+
+The script generates:
+
+| Output file | Contents |
+| --- | --- |
+| `InterTest_pulls.html` | Interactive pull plots. |
+| `InterTest_residuals.html` | Interactive residual plots. |
+
+Open these files in a web browser to explore the results.
+
+## Adding custom histograms and plots
+
+Use `OutputObjInterface` to add custom output objects:
+
+1. Create a class derived from `OutputObjInterface`, located in `UnitTests/OutputObjInterface/`.
+2. Use `ExampleOutput.h` in that directory as an implementation example.
+3. Register an instance of your class in the `OutputMap` structure in `OutputMap.h`, following the existing example.
+4. Run the test to generate your custom output.
+
+## Workflow
+
+1. Install ROOT and build the KFParticle branch to be evaluated.
+2. Download or generate Monte Carlo data.
+3. Configure the reconstruction options and file paths in `UnitTests/ConfigConstants.h`.
+4. Run `RunKFUnitTestMacro.cxx` to generate ROOT trees and QA histograms.
+5. Inspect the output to assess reconstruction quality.
+6. Optionally run `CreateInteractiveTest.cxx` to generate browser-based pull and residual plots.
