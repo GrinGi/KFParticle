@@ -173,10 +173,75 @@ namespace
     finder->SetChi2Cut2D(1000000.f);
     finder->SetLdLCut2D(-1000000.f);
     finder->SetSecondaryCuts(1000000.f, 1000000.f, -1000000.f);
-    reconstructor.Init(first, last);
-    reconstructor.AddPV(vertex);
-    reconstructor.SortTracks();
-    reconstructor.ReconstructParticles();
+    std::vector<KFParticle> reference;
+    KFPTrackVector sortedReference[8];
+    for (bool preparePV : {true, false}) {
+      if (preparePV) { reconstructor.Init(first, last); }
+      else { reconstructor.Init(first, last, false); }
+      Require(reconstructor.NPrimaryVertices() == 0 && reconstructor.GetParticles().empty(),
+              "external-PV initialisation retained the previous event");
+      reconstructor.AddPV(vertex);
+      Require(reconstructor.NPrimaryVertices() == 1 && reconstructor.GetPVTrackIndexArray(0).empty(),
+              "external-PV initialisation changed the QA vertex/cluster state");
+      const auto& qaVertex = reconstructor.GetPrimVertex(0);
+      Require(qaVertex.GetNDF() == vertex.GetNDF() && qaVertex.GetChi2() == vertex.GetChi2(),
+              "external-PV initialisation changed the QA vertex fit metadata");
+      for (int component = 0; component < 8; ++component) {
+        Require(qaVertex.GetParameter(component) == vertex.GetParameter(component),
+                "external-PV initialisation changed a QA vertex parameter");
+      }
+      for (int component = 0; component < 36; ++component) {
+        Require(qaVertex.GetCovariance(component) == vertex.GetCovariance(component),
+                "external-PV initialisation changed the QA vertex covariance");
+      }
+      reconstructor.SortTracks();
+      for (int set = 0; set < 8; ++set) {
+        const auto& tracks = reconstructor.GetTracks()[set];
+        if (preparePV) { sortedReference[set] = tracks; continue; }
+        const auto& expected = sortedReference[set];
+        Require(tracks.Size() == expected.Size(), "external-PV initialisation changed a track group");
+        for (int track = 0; track < tracks.Size(); ++track) {
+          Require(tracks.Id()[track] == expected.Id()[track] && tracks.PDG()[track] == expected.PDG()[track]
+                    && tracks.Q()[track] == expected.Q()[track]
+                    && tracks.PVIndex()[track] == expected.PVIndex()[track]
+                    && tracks.NPixelHits()[track] == expected.NPixelHits()[track],
+                  "external-PV initialisation changed track identity or PV association");
+          for (int component = 0; component < 6; ++component) {
+            Require(tracks.Parameter(component)[track] == expected.Parameter(component)[track],
+                    "external-PV initialisation changed a track parameter");
+          }
+          for (int component = 0; component < 21; ++component) {
+            Require(tracks.Covariance(component)[track] == expected.Covariance(component)[track],
+                    "external-PV initialisation changed a track covariance");
+          }
+          for (int component = 0; component < 10; ++component) {
+            Require(tracks.FieldCoefficient(component)[track] == expected.FieldCoefficient(component)[track],
+                    "external-PV initialisation changed the track field");
+          }
+        }
+      }
+      // Exercise the real CPU finder used by fallback, not just the GPU path.
+      reconstructor.ReconstructParticles();
+      const auto& particles = reconstructor.GetParticles();
+      if (preparePV) { reference = particles; continue; }
+      Require(particles.size() == reference.size(), "external-PV CPU fallback changed the particle count");
+      for (std::size_t index = 0u; index < particles.size(); ++index) {
+        const auto& particle = particles[index];
+        const auto& expected = reference[index];
+        Require(particle.Id() == expected.Id() && particle.GetPDG() == expected.GetPDG()
+                  && particle.GetQ() == expected.GetQ() && particle.DaughterIds() == expected.DaughterIds()
+                  && particle.GetNDF() == expected.GetNDF() && particle.GetChi2() == expected.GetChi2(),
+                "external-PV CPU fallback changed particle identity or fit metadata");
+        for (int component = 0; component < 8; ++component) {
+          Require(particle.GetParameter(component) == expected.GetParameter(component),
+                  "external-PV CPU fallback changed a fitted parameter");
+        }
+        for (int component = 0; component < 36; ++component) {
+          Require(particle.GetCovariance(component) == expected.GetCovariance(component),
+                  "external-PV CPU fallback changed a fitted covariance");
+        }
+      }
+    }
 
     // Validate the extracted diagnostic bridge while the CPU's sorted state is alive.
     // Two slots keep this single observation queued, without another GPU execution.
@@ -188,6 +253,44 @@ namespace
     Require(completed.empty() && !collector.Empty(),
             "CPU reference bridge did not retain the completed CPU event");
     return reconstructor.GetParticles();
+  }
+
+  void CheckExternalPrimaryVertexInitialization()
+  {
+    KFPTrackVector first;
+    KFPTrackVector last;
+    first.Resize(2);
+    last.Resize(2);
+    FillTrack(first, 0u, 211, 1, 701, 0.32f, 0.10f, 0.05f, 0.f);
+    FillTrack(first, 1u, -211, -1, 702, 0.23f, -0.10f, -0.05f, 0.01f);
+    last = first;
+    for (unsigned int track = 0u; track < 2u; ++track) {
+      first.SetPVIndex(0, track);
+      last.SetPVIndex(0, track);
+    }
+    RunCpuFinder(first, last, MakePrimaryVertex(), 310);
+
+    // Clear several supplied PVs and their track links, then restore PV search.
+    KFParticleTopoReconstructor reconstructor;
+    reconstructor.Init(first, last, false);
+    reconstructor.AddPV(MakePrimaryVertex(), {0, 1});
+    reconstructor.AddPV(MakePrimaryVertex(1.f, 2.f, 3.f));
+    reconstructor.AddParticle(KFParticle());
+    reconstructor.Init(first, last, false);
+    Require(reconstructor.NPrimaryVertices() == 0 && reconstructor.GetParticles().empty(),
+            "external-PV initialisation did not clear multiple supplied vertices");
+    reconstructor.Init(first, last);
+    reconstructor.ReconstructPrimVertex(false);
+    Require(reconstructor.NPrimaryVertices() > 0,
+            "the original Init no longer supports primary-vertex reconstruction");
+    first.Resize(0);
+    last.Resize(0);
+    reconstructor.Init(first, last, false);
+    Require(reconstructor.NPrimaryVertices() == 0 && reconstructor.GetParticles().empty(),
+            "empty external-PV input retained the previous event");
+    RunCpuFinder(first, last, MakePrimaryVertex(), 310);
+    std::cout << "PASS cbmroot-external-pv-init"
+              << " - QA state, primary tracks, empty input, CPU fallback and event reset agree" << std::endl;
   }
 
   KFParticleGpuTwoDaughterChannel ChannelForMother(int motherPdg)
@@ -1057,6 +1160,7 @@ int main(int argc, char** argv)
     cbm::Xpu::Instance().Init();
     Require(cbm::Xpu::Instance().IsInitialized(), "CBMRoot did not initialize XPU");
 
+    CheckExternalPrimaryVertexInitialization();
     CheckEquivalentCase({"k0s", 211, -211, 310, 1, -1, 101, 102}, 901u);
     CheckEquivalentCase({"lambda", 2212, -211, 3122, 1, -1, 201, 202}, 902u);
     CheckEquivalentCase({"anti-lambda", 211, -2212, -3122, 1, -1, 301, 302}, 903u);
