@@ -156,6 +156,20 @@ class KFParticleTopoReconstructor {
    **/
   void Init(KFPTrackVector& tracks, KFPTrackVector& tracksAtLastPoint);
 
+  /** Copies tracks at the first and last hit positions, optionally preparing
+   ** the internal primary-vertex search. Previous particles and vertices are
+   ** cleared in both modes; input track ownership and values are unchanged.
+   ** With initPVTracks=false, supply vertices through AddPV() before particle
+   ** reconstruction. ReconstructPrimVertex() requires reinitialisation with
+   ** preparation enabled. Sorting, QA access and CPU particle reconstruction
+   ** remain available with externally supplied vertices.
+   ** \param[in] tracks - tracks at the first hit position
+   ** \param[in] tracksAtLastPoint - tracks at the last hit position
+   ** \param[in] initPVTracks - prepare the internal search for primary vertices
+   **/
+  void Init(KFPTrackVector &tracks, KFPTrackVector &tracksAtLastPoint,
+            bool initPVTracks);
+
   // BEGIN ADDING CBM COMPATIBILITY
   void SetTarget(float targetX, float targetY, float targetZ);
   void SetTarget(const std::array<float, 3>& target);

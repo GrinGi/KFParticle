@@ -296,6 +296,12 @@ const std::array<float, 3> KFParticleTopoReconstructor::GetTargetPosition()
 
 void KFParticleTopoReconstructor::Init(KFPTrackVector& tracks, KFPTrackVector& tracksAtLastPoint)
 {
+  Init(tracks, tracksAtLastPoint, true);
+}
+
+void KFParticleTopoReconstructor::Init(KFPTrackVector& tracks, KFPTrackVector& tracksAtLastPoint,
+                                     bool initPVTracks)
+{
 #ifdef USE_TIMERS
   timer.Start();
 #endif  // USE_TIMERS
@@ -317,7 +323,8 @@ void KFParticleTopoReconstructor::Init(KFPTrackVector& tracks, KFPTrackVector& t
   fTracks[5].Resize(0);
   fTracks[6].Resize(0);
   fTracks[7].Resize(0);
-  fKFParticlePVReconstructor->Init(&fTracks[0], nTracks);
+  if (initPVTracks) { fKFParticlePVReconstructor->Init(&fTracks[0], nTracks); }
+  else { fKFParticlePVReconstructor->CleanPV(); }
 
 #ifdef USE_TIMERS
   timer.Stop();
