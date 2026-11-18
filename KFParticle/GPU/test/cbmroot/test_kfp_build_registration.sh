@@ -427,7 +427,7 @@ fi
 
 # Dependency fixtures for configuration checks; these are not numerical tests.
 sdk="$temporary/sdk"
-mkdir -p "$sdk/deps" "$sdk/xpu/src/xpu" "$sdk/project" "$sdk/consumer" \
+mkdir -p "$sdk/deps" "$sdk/xpu/src/xpu" "$sdk/vir-simd/vir" "$sdk/project" "$sdk/consumer" \
   "$sdk/installed-xpu/include/xpu" "$sdk/installed-xpu/lib64"
 touch "$sdk/installed-xpu/include/xpu/host.h" \
   "$sdk/installed-xpu/lib64/libxpu.so" "$sdk/installed-xpu/lib64/libxpu.dylib"
@@ -450,12 +450,13 @@ function(ROOT_GENERATE_DICTIONARY name)
   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/${name}.cxx" "// Configuration fixture.\n")
 endfunction()
 CMAKE
-cat >"$sdk/deps/VcConfig.cmake" <<'CMAKE'
-set(Vc_FOUND TRUE)
-set(Vc_LIBRARIES Vc::Vc)
-if(NOT TARGET Vc::Vc)
-  add_library(Vc::Vc INTERFACE IMPORTED GLOBAL)
-endif()
+cat >"$sdk/vir-simd/CMakeLists.txt" <<'CMAKE'
+add_library(vir-simd INTERFACE)
+target_include_directories(vir-simd INTERFACE
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>" "$<INSTALL_INTERFACE:include>")
+target_compile_features(vir-simd INTERFACE cxx_std_17)
+install(TARGETS vir-simd EXPORT vir-simd-config)
+install(EXPORT vir-simd-config NAMESPACE vir-simd:: DESTINATION lib/cmake/vir-simd)
 CMAKE
 cat >"$sdk/xpu/CMakeLists.txt" <<'CMAKE'
 add_library(xpu SHARED dummy.cpp)
@@ -478,6 +479,8 @@ CMAKE
 cat >"$sdk/cbm/CMakeLists.txt" <<'CMAKE'
 cmake_minimum_required(VERSION 3.18)
 project(KfpCbmGraph LANGUAGES CXX)
+add_subdirectory("${SIMD_FIXTURE}" vir-simd)
+get_target_property(parent_simd_source vir-simd SOURCE_DIR)
 function(download_project_if_needed)
   if("PATCH_COMMAND" IN_LIST ARGN)
     message(FATAL_ERROR "obsolete KFParticle patch requested")
@@ -499,6 +502,11 @@ endif()
 file(WRITE "${CMAKE_BINARY_DIR}/external/KFPARTICLE-prefix/keep.txt" "Unrelated legacy build artifacts.\n")
 set(parent_sdk_setting "${KFPARTICLE_INSTALL_SDK}")
 add_subdirectory(external)
+get_target_property(simd_source vir-simd SOURCE_DIR)
+get_target_property(kfp_links KFParticle LINK_LIBRARIES)
+if(NOT simd_source STREQUAL parent_simd_source OR NOT "vir-simd" IN_LIST kfp_links)
+  message(FATAL_ERROR "KFParticle did not reuse the parent vir-simd target")
+endif()
 if(NOT EXISTS "${CMAKE_BINARY_DIR}/external/KFPARTICLE-prefix/keep.txt")
   message(FATAL_ERROR "KFParticle configuration deleted an existing build directory")
 endif()
@@ -546,7 +554,8 @@ for standalone in OFF ON; do
     log="$sdk/cbm-$standalone-$gpu.log"
     if ! cmake -S "$sdk/cbm" -B "$sdk/cbm-$standalone-$gpu" \
         -DCMAKE_PREFIX_PATH="$sdk/deps" -DCBM_SOURCE="$source_dir" \
-        -DXPU_FIXTURE="$sdk/xpu" -DKFPARTICLE_INSTALL_SDK=ON \
+        -DXPU_FIXTURE="$sdk/xpu" -DSIMD_FIXTURE="$sdk/vir-simd" \
+        -DCMAKE_DISABLE_FIND_PACKAGE_Vc=ON -DKFPARTICLE_INSTALL_SDK=ON \
         -DCBM_ONLINE_STANDALONE="$standalone" -DCBM_KFPARTICLE_USE_XPU="$gpu" \
         -DKFPARTICLE_UPDATE_SOURCE="$standalone" >"$log" 2>&1; then
       cat "$log" >&2; exit 1
@@ -559,7 +568,8 @@ for failure in OMIT_PARENT_XPU DROP_PARENT_XPU_LINK; do
   failure_log="$sdk/cbm-$failure.log"
   if cmake --log-level=WARNING -S "$sdk/cbm" -B "$sdk/cbm-$failure" \
       -DCMAKE_PREFIX_PATH="$sdk/deps" -DCBM_SOURCE="$source_dir" \
-      -DXPU_FIXTURE="$sdk/xpu" -DCBM_KFPARTICLE_USE_XPU=ON "-D$failure=ON" \
+      -DXPU_FIXTURE="$sdk/xpu" -DSIMD_FIXTURE="$sdk/vir-simd" \
+      -DCBM_KFPARTICLE_USE_XPU=ON "-D$failure=ON" \
       >"$failure_log" 2>&1; then
     echo "FAIL embedded build accepted $failure" >&2; exit 1
   fi
@@ -576,6 +586,7 @@ cat >"$sdk/embedded-only/CMakeLists.txt" <<'CMAKE'
 cmake_minimum_required(VERSION 3.18)
 project(KfpEmbeddedOnly LANGUAGES CXX)
 add_library(KFParticle SHARED "${XPU_FIXTURE}/dummy.cpp")
+target_link_libraries(KFParticle PUBLIC vir-simd)
 set_target_properties(KFParticle PROPERTIES COMPILE_FLAGS
   "-DDO_TPCCATRACKER_EFF_PERFORMANCE -DNonhomogeneousField -DCBM -DUSE_TIMERS")
 if(KFPARTICLE_USE_XPU)
@@ -588,7 +599,7 @@ for gpu in OFF ON; do
   failure_log="$sdk/embedded-only-$gpu.log"
   if ! cmake -S "$sdk/cbm" -B "$sdk/embedded-only-$gpu" \
       -DCMAKE_PREFIX_PATH="$sdk/deps" -DCBM_SOURCE="$source_dir" \
-      -DXPU_FIXTURE="$sdk/xpu" -DCBM_KFPARTICLE_USE_XPU="$gpu" \
+      -DXPU_FIXTURE="$sdk/xpu" -DSIMD_FIXTURE="$sdk/vir-simd" -DCBM_KFPARTICLE_USE_XPU="$gpu" \
       >"$failure_log" 2>&1; then
     cat "$failure_log" >&2; exit 1
   fi
@@ -614,11 +625,12 @@ if(NOT sdk_option_type STREQUAL "BOOL")
   message(FATAL_ERROR
     "KFParticle does not provide the requested standalone SDK. SDK support is not required for the cbmroot contract.")
 endif()
+get_target_property(simd_binary vir-simd BINARY_DIR)
 file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/fixture-prefix.cmake" CONTENT "
 file(MAKE_DIRECTORY \"${CMAKE_INSTALL_PREFIX}/lib64/cmake/KFParticle\"
+  \"${CMAKE_INSTALL_PREFIX}/lib/cmake/vir-simd\"
+  \"${CMAKE_INSTALL_PREFIX}/include/vir\"
   \"${CMAKE_INSTALL_PREFIX}/include/KFParticle/GPU\"
-  \"${CMAKE_INSTALL_PREFIX}/include/KFParticle/KFPSimd/Utils\"
-  \"${CMAKE_INSTALL_PREFIX}/include/KFParticle/KFPSimd/SSE\"
   \"${CMAKE_INSTALL_PREFIX}/include/KFParticlePerformance\"
   \"${CMAKE_INSTALL_PREFIX}/include/KFParticleTest\")
 file(WRITE \"${CMAKE_INSTALL_PREFIX}/lib64/$<TARGET_FILE_NAME:KFParticle>\" \"\")
@@ -636,11 +648,17 @@ file(COPY \${exports} \"${CMAKE_BINARY_DIR}/kfp/KFParticleConfig.cmake\"
   \"${CMAKE_BINARY_DIR}/kfp/KFParticleConfigVersion.cmake\"
   \"${KFP_SOURCE}/cmake/KFParticleXpu.cmake\"
   DESTINATION \"${CMAKE_INSTALL_PREFIX}/lib64/cmake/KFParticle\")
+file(GLOB_RECURSE simd_exports \"${simd_binary}/CMakeFiles/Export/vir-simd-config*.cmake\")
+if(NOT simd_exports)
+  message(FATAL_ERROR \"vir-simd export files are missing\")
+endif()
+file(COPY \${simd_exports} DESTINATION \"${CMAKE_INSTALL_PREFIX}/lib/cmake/vir-simd\")
 ")
 CMAKE
 sdk_args=(-S "$sdk/project" -DKFP_SOURCE="$kfp_source"
   -DKFPARTICLE_USE_XPU=ON -DFIXTARGET=ON -DKFPARTICLE_INSTALL_SDK=ON
   -DKFPARTICLE_XPU_SOURCE_DIR="$sdk/xpu" -DCMAKE_PREFIX_PATH="$sdk/deps"
+  -DFETCHCONTENT_SOURCE_DIR_VIR-SIMD="$sdk/vir-simd" -DCMAKE_DISABLE_FIND_PACKAGE_Vc=ON
   -DXPU_ENABLE_HIP=OFF -DXPU_ENABLE_OPENMP=OFF
   -DCMAKE_INSTALL_LIBDIR=lib64 -DCMAKE_INSTALL_PREFIX="$sdk/prefix")
 # Reject an entry point that ignores the requested standalone SDK installation.
@@ -667,6 +685,8 @@ mv "$sdk/prefix" "$sdk/relocated"
 cat >"$sdk/consumer/CMakeLists.txt" <<'CMAKE'
 cmake_minimum_required(VERSION 3.18)
 project(KfpInstalledContract LANGUAGES CXX)
+# Debian/Ubuntu do not search lib64 implicitly; keep this check portable.
+set_property(GLOBAL PROPERTY FIND_LIBRARY_USE_LIB64_PATHS FALSE)
 find_package(KFParticle 0.1 CONFIG REQUIRED COMPONENTS GPU)
 if(EXPECT_EXTERNAL)
   get_target_property(xpu_library XPU::xpu IMPORTED_LOCATION)
@@ -677,6 +697,10 @@ if(EXPECT_EXTERNAL)
 endif()
 get_target_property(includes KFParticle::KFParticle INTERFACE_INCLUDE_DIRECTORIES)
 get_target_property(definitions KFParticle::KFParticle INTERFACE_COMPILE_DEFINITIONS)
+get_target_property(links KFParticle::KFParticle INTERFACE_LINK_LIBRARIES)
+if(NOT TARGET vir-simd::vir-simd OR NOT "vir-simd::vir-simd" IN_LIST links)
+  message(FATAL_ERROR "Installed SDK lost its vir-simd dependency")
+endif()
 if(NOT "NonhomogeneousField" IN_LIST definitions OR NOT "KFPARTICLE_USE_XPU" IN_LIST definitions)
   message(FATAL_ERROR "Installed scalar/GPU ABI definitions are missing")
 endif()
@@ -694,7 +718,8 @@ if(REQUIRE_HIP)
 endif()
 CMAKE
 consumer_args=(-S "$sdk/consumer" -DCMAKE_PREFIX_PATH="$sdk/relocated;$sdk/deps"
-  -DSDK_PREFIX="$sdk/relocated")
+  -DKFParticle_DIR="$sdk/relocated/lib64/cmake/KFParticle"
+  -DCMAKE_DISABLE_FIND_PACKAGE_Vc=ON -DSDK_PREFIX="$sdk/relocated")
 failure_log="$sdk/import.log"
 if ! cmake "${consumer_args[@]}" -B "$sdk/import" >"$sdk/import.log" 2>&1; then
   cat "$sdk/import.log" >&2; exit 1
@@ -716,6 +741,7 @@ cmake -P "$sdk/external/fixture-prefix.cmake"
 failure_log="$sdk/external-import.log"
 if ! cmake -S "$sdk/consumer" -B "$sdk/external-import" \
     -DCMAKE_PREFIX_PATH="$sdk/external-prefix;$sdk/deps" \
+    -DKFParticle_DIR="$sdk/external-prefix/lib64/cmake/KFParticle" \
     -DSDK_PREFIX="$sdk/external-prefix" -DKFPARTICLE_XPU_ROOT="$sdk/installed-xpu" \
     -DEXPECT_EXTERNAL=ON >"$sdk/external-import.log" 2>&1; then
   cat "$sdk/external-import.log" >&2; exit 1

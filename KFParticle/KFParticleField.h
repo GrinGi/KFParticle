@@ -41,7 +41,7 @@
 
 class KFParticleFieldValue {
  public:
-  using float_v = kfp::simd::float_v;
+  using float_v = ::kfp::simd::float_v;
 
   KFParticleFieldValue() : x(0.f), y(0.f), z(0.f) {};
 
@@ -88,7 +88,7 @@ class KFParticleFieldValue {
 
 class KFParticleFieldRegion {
  public:
-  using float_v = kfp::simd::float_v;
+  using float_v = ::kfp::simd::float_v;
 
   KFParticleFieldRegion() {};
   KFParticleFieldRegion(const float field[10])

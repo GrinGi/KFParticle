@@ -21,6 +21,7 @@ run_ld_path="${library_dir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 include_path="${source_dir}:${source_dir}/reco/base:${source_dir}/algo/kfp/gpu"
 include_path+=":${source_dir}/external/KFParticle/KFParticle/GPU"
 include_path+=":${source_dir}/external/KFParticle/KFParticle:${source_dir}/external/xpu/src"
+include_path+=":${source_dir}/external/vir-simd"
 include_path+="${ROOT_INCLUDE_PATH:+:${ROOT_INCLUDE_PATH}}"
 
 if [[ -r "${build_dir}/CMakeCache.txt" ]]; then

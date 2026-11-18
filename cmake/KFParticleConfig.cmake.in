@@ -3,7 +3,7 @@
 include(CMakeFindDependencyMacro)
 set(_KFParticle_package_prefix "${PACKAGE_PREFIX_DIR}")
 find_dependency(ROOT CONFIG COMPONENTS Core Hist Matrix Physics EG Gpad Graf Graf3d RIO MathCore)
-find_dependency(Vc CONFIG)
+find_dependency(vir-simd CONFIG)
 if(@KFPARTICLE_SDK_NEEDS_OPENMP@)
   find_dependency(OpenMP COMPONENTS CXX)
 endif()

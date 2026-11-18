@@ -45,9 +45,6 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
     endif()
   endif()
 endif()
-if(NOT Vc_VERSION)
-  set(Vc_VERSION "${Vc_VERSION_STRING}")
-endif()
 if(KFPARTICLE_USE_XPU)
   get_target_property(KFPARTICLE_SDK_EXTERNAL_XPU xpu IMPORTED)
   if(NOT KFPARTICLE_SDK_EXTERNAL_XPU)
@@ -100,13 +97,9 @@ foreach(component Core Hist Matrix Physics EG Gpad Graf Graf3d RIO MathCore)
   endif()
   list(APPEND sdk_dependencies ROOT::${component})
 endforeach()
-if(TARGET Vc::Vc)
-  list(APPEND sdk_dependencies Vc::Vc)
-elseif(TARGET Vc)
-  list(APPEND sdk_dependencies Vc)
-else()
-  message(FATAL_ERROR "Installed SDK requires the Vc CONFIG target Vc::Vc or Vc")
-endif()
+# Use the installed name; vir-simd exports its header-only target separately.
+list(APPEND sdk_dependencies
+  "$<BUILD_INTERFACE:vir-simd>" "$<INSTALL_INTERFACE:vir-simd::vir-simd>")
 set_property(TARGET KFParticle PROPERTY INTERFACE_LINK_LIBRARIES "${sdk_dependencies}")
 if(KFPARTICLE_USE_XPU)
   if(KFPARTICLE_SDK_EXTERNAL_XPU)
@@ -134,7 +127,7 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/KFParticleConfig.cmake"
   "${CMAKE_CURRENT_BINARY_DIR}/KFParticleConfigVersion.cmake"
   "${CMAKE_CURRENT_LIST_DIR}/KFParticleXpu.cmake" DESTINATION "${package_dir}")
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/KFParticleBuildInfo.txt"
-  "sdk_version=${KFPARTICLE_SDK_VERSION}\nkfparticle_revision=${sdk_revision}\nkfparticle_dirty=${sdk_dirty}\nkfparticle_content_sha256=${KFPARTICLE_SDK_SOURCE_SHA256}\nxpu_external=${KFPARTICLE_SDK_EXTERNAL_XPU}\nxpu_library=${KFPARTICLE_XPU_LIBRARY}\ngpu=${KFPARTICLE_USE_XPU}\nhip=${KFPARTICLE_SDK_HIP}\nhip_arch=${XPU_HIP_ARCH}\nrocm=${KFPARTICLE_SDK_ROCM_VERSION}\nfixtarget=${FIXTARGET}\nunroll=${KFPARTICLE_GPU_FIT_UNROLL}\ncxx_standard=${CMAKE_CXX_STANDARD}\ncompiler=${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}\ncmake=${CMAKE_VERSION}\nroot=${ROOT_VERSION}\nvc=${Vc_VERSION}\n")
+  "sdk_version=${KFPARTICLE_SDK_VERSION}\nkfparticle_revision=${sdk_revision}\nkfparticle_dirty=${sdk_dirty}\nkfparticle_content_sha256=${KFPARTICLE_SDK_SOURCE_SHA256}\nxpu_external=${KFPARTICLE_SDK_EXTERNAL_XPU}\nxpu_library=${KFPARTICLE_XPU_LIBRARY}\ngpu=${KFPARTICLE_USE_XPU}\nhip=${KFPARTICLE_SDK_HIP}\nhip_arch=${XPU_HIP_ARCH}\nrocm=${KFPARTICLE_SDK_ROCM_VERSION}\nfixtarget=${FIXTARGET}\nunroll=${KFPARTICLE_GPU_FIT_UNROLL}\ncxx_standard=${CMAKE_CXX_STANDARD}\ncompiler=${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}\ncmake=${CMAKE_VERSION}\nroot=${ROOT_VERSION}\nvir_simd=848c298f879c9264d500c1d4ef5ad996333f9b64\n")
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/KFParticleBuildInfo.txt"
   DESTINATION "${CMAKE_INSTALL_DATADIR}/KFParticle")
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/KFParticle/GPU/README.md"

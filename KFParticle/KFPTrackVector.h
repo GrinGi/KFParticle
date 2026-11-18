@@ -55,12 +55,12 @@ class KFPTrackVector {
   friend class KFParticleTopoReconstructor;
 
  public:
-  using float_v = kfp::float_v;
-  using int_v   = kfp::int_v;
+  using float_v = ::kfp::float_v;
+  using int_v   = ::kfp::int_v;
   template<typename T>
-  using PaddedVector = kfp::simd::PaddedVector<T>;
+  using PaddedVector = ::kfp::simd::PaddedVector<T>;
 
-  static constexpr auto SimdLen = kfp::SimdLen;
+  static constexpr auto SimdLen = ::kfp::SimdLen;
 
   KFPTrackVector()
     : fId()

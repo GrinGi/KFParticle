@@ -61,10 +61,10 @@ class KFParticle;
 class KFParticleSIMD {
 
  public:
-  using float_v = kfp::float_v;
-  using float_m = kfp::float_m;
-  using int_v   = kfp::int_v;
-  using int_m   = kfp::int_m;
+  using float_v = ::kfp::float_v;
+  using float_m = ::kfp::float_m;
+  using int_v   = ::kfp::int_v;
+  using int_m   = ::kfp::int_m;
 
   //*
   //*  INITIALIZATION
@@ -574,163 +574,163 @@ inline void KFParticleSIMD::SetField(float_v Bz)
 }
 #endif
 
-inline kfp::float_v KFParticleSIMD::GetP() const
+inline ::kfp::float_v KFParticleSIMD::GetP() const
 {
   float_v par, err;
   GetMomentum(par, err);
   return par;
 }
 
-inline kfp::float_v KFParticleSIMD::GetPt() const
+inline ::kfp::float_v KFParticleSIMD::GetPt() const
 {
   float_v par, err;
   GetPt(par, err);
   return par;
 }
 
-inline kfp::float_v KFParticleSIMD::GetEta() const
+inline ::kfp::float_v KFParticleSIMD::GetEta() const
 {
   float_v par, err;
   GetEta(par, err);
   return par;
 }
 
-inline kfp::float_v KFParticleSIMD::GetPhi() const
+inline ::kfp::float_v KFParticleSIMD::GetPhi() const
 {
   float_v par, err;
   KFParticleSIMD::GetPhi(par, err);
   return par;
 }
 
-inline kfp::float_v KFParticleSIMD::GetMomentum() const
+inline ::kfp::float_v KFParticleSIMD::GetMomentum() const
 {
   float_v par, err;
   GetMomentum(par, err);
   return par;
 }
 
-inline kfp::float_v KFParticleSIMD::GetMass() const
+inline ::kfp::float_v KFParticleSIMD::GetMass() const
 {
   float_v par, err;
   GetMass(par, err);
   return par;
 }
 
-inline kfp::float_v KFParticleSIMD::GetDecayLength() const
+inline ::kfp::float_v KFParticleSIMD::GetDecayLength() const
 {
   float_v par, err;
   GetDecayLength(par, err);
   return par;
 }
 
-inline kfp::float_v KFParticleSIMD::GetDecayLengthXY() const
+inline ::kfp::float_v KFParticleSIMD::GetDecayLengthXY() const
 {
   float_v par, err;
   KFParticleSIMD::GetDecayLengthXY(par, err);
   return par;
 }
 
-inline kfp::float_v KFParticleSIMD::GetLifeTime() const
+inline ::kfp::float_v KFParticleSIMD::GetLifeTime() const
 {
   float_v par, err;
   KFParticleSIMD::GetLifeTime(par, err);
   return par;
 }
 
-inline kfp::float_v KFParticleSIMD::GetR() const
+inline ::kfp::float_v KFParticleSIMD::GetR() const
 {
   float_v par, err;
   KFParticleSIMD::GetR(par, err);
   return par;
 }
 
-inline kfp::float_v KFParticleSIMD::GetErrX() const { return sqrt(abs(GetCovariance(0, 0))); }
+inline ::kfp::float_v KFParticleSIMD::GetErrX() const { return sqrt(abs(GetCovariance(0, 0))); }
 
-inline kfp::float_v KFParticleSIMD::GetErrY() const { return sqrt(abs(GetCovariance(1, 1))); }
+inline ::kfp::float_v KFParticleSIMD::GetErrY() const { return sqrt(abs(GetCovariance(1, 1))); }
 
-inline kfp::float_v KFParticleSIMD::GetErrZ() const { return sqrt(abs(GetCovariance(2, 2))); }
+inline ::kfp::float_v KFParticleSIMD::GetErrZ() const { return sqrt(abs(GetCovariance(2, 2))); }
 
-inline kfp::float_v KFParticleSIMD::GetErrPx() const { return sqrt(abs(GetCovariance(3, 3))); }
+inline ::kfp::float_v KFParticleSIMD::GetErrPx() const { return sqrt(abs(GetCovariance(3, 3))); }
 
-inline kfp::float_v KFParticleSIMD::GetErrPy() const { return sqrt(abs(GetCovariance(4, 4))); }
+inline ::kfp::float_v KFParticleSIMD::GetErrPy() const { return sqrt(abs(GetCovariance(4, 4))); }
 
-inline kfp::float_v KFParticleSIMD::GetErrPz() const { return sqrt(abs(GetCovariance(5, 5))); }
+inline ::kfp::float_v KFParticleSIMD::GetErrPz() const { return sqrt(abs(GetCovariance(5, 5))); }
 
-inline kfp::float_v KFParticleSIMD::GetErrE() const { return sqrt(abs(GetCovariance(6, 6))); }
+inline ::kfp::float_v KFParticleSIMD::GetErrE() const { return sqrt(abs(GetCovariance(6, 6))); }
 
-inline kfp::float_v KFParticleSIMD::GetErrS() const { return sqrt(abs(GetCovariance(7, 7))); }
+inline ::kfp::float_v KFParticleSIMD::GetErrS() const { return sqrt(abs(GetCovariance(7, 7))); }
 
-inline kfp::float_v KFParticleSIMD::GetErrP() const
+inline ::kfp::float_v KFParticleSIMD::GetErrP() const
 {
   float_v par, err;
   float_m mask = GetMomentum(par, err);
-  return kfp::select(mask, 1.e10f, err);
+  return ::kfp::select(mask, 1.e10f, err);
 }
 
-inline kfp::float_v KFParticleSIMD::GetErrPt() const
+inline ::kfp::float_v KFParticleSIMD::GetErrPt() const
 {
   float_v par, err;
   float_m mask = GetPt(par, err);
-  return kfp::select(mask, 1.e10f, err);
+  return ::kfp::select(mask, 1.e10f, err);
 }
 
-inline kfp::float_v KFParticleSIMD::GetErrEta() const
+inline ::kfp::float_v KFParticleSIMD::GetErrEta() const
 {
   float_v par, err;
   float_m mask = GetEta(par, err);
-  return kfp::select(mask, 1.e10f, err);
+  return ::kfp::select(mask, 1.e10f, err);
 }
 
-inline kfp::float_v KFParticleSIMD::GetErrPhi() const
+inline ::kfp::float_v KFParticleSIMD::GetErrPhi() const
 {
   float_v par, err;
   float_m mask = GetPhi(par, err);
-  return kfp::select(mask, 1.e10f, err);
+  return ::kfp::select(mask, 1.e10f, err);
 }
 
-inline kfp::float_v KFParticleSIMD::GetErrMomentum() const
+inline ::kfp::float_v KFParticleSIMD::GetErrMomentum() const
 {
   float_v par, err;
   float_m mask = GetMomentum(par, err);
-  return kfp::select(mask, 1.e10f, err);
+  return ::kfp::select(mask, 1.e10f, err);
 }
 
-inline kfp::float_v KFParticleSIMD::GetErrMass() const
+inline ::kfp::float_v KFParticleSIMD::GetErrMass() const
 {
   float_v par, err;
   float_m mask = KFParticleSIMD::GetMass(par, err);
-  return kfp::select(mask, 1.e10f, err);
+  return ::kfp::select(mask, 1.e10f, err);
 }
 
-inline kfp::float_v KFParticleSIMD::GetErrDecayLength() const
+inline ::kfp::float_v KFParticleSIMD::GetErrDecayLength() const
 {
   float_v par, err;
   float_m mask = KFParticleSIMD::GetDecayLength(par, err);
-  return kfp::select(mask, 1.e10f, err);
+  return ::kfp::select(mask, 1.e10f, err);
 }
 
-inline kfp::float_v KFParticleSIMD::GetErrDecayLengthXY() const
+inline ::kfp::float_v KFParticleSIMD::GetErrDecayLengthXY() const
 {
   float_v par, err;
   float_m mask = KFParticleSIMD::GetDecayLengthXY(par, err);
-  return kfp::select(mask, 1.e10f, err);
+  return ::kfp::select(mask, 1.e10f, err);
 }
 
-inline kfp::float_v KFParticleSIMD::GetErrLifeTime() const
+inline ::kfp::float_v KFParticleSIMD::GetErrLifeTime() const
 {
   float_v par, err;
   float_m mask = KFParticleSIMD::GetLifeTime(par, err);
-  return kfp::select(mask, 1.e10f, err);
+  return ::kfp::select(mask, 1.e10f, err);
 }
 
-inline kfp::float_v KFParticleSIMD::GetErrR() const
+inline ::kfp::float_v KFParticleSIMD::GetErrR() const
 {
   float_v par, err;
   float_m mask = KFParticleSIMD::GetR(par, err);
-  return kfp::select(mask, 1.e10f, err);
+  return ::kfp::select(mask, 1.e10f, err);
 }
 
-inline kfp::float_m KFParticleSIMD::GetP(float_v& P, float_v& SigmaP) const
+inline ::kfp::float_m KFParticleSIMD::GetP(float_v& P, float_v& SigmaP) const
 {
   /** Calculates particle momentum and its error. If they are well defined
    *returns 0, otherwise 1.
@@ -771,7 +771,7 @@ inline void KFParticleSIMD::TransportToParticle(const KFParticleSIMD& p)
   TransportToDS(dS[0], dsdr[0]);
 }
 
-inline kfp::float_v KFParticleSIMD::GetDStoPoint(const float_v xyz[3], float_v dsdr[6]) const
+inline ::kfp::float_v KFParticleSIMD::GetDStoPoint(const float_v xyz[3], float_v dsdr[6]) const
 {
   /** Returns dS = l/p parameter, where \n
    ** 1) l - signed distance to the DCA point with the input xyz point;\n
@@ -797,7 +797,7 @@ inline kfp::float_v KFParticleSIMD::GetDStoPoint(const float_v xyz[3], float_v d
 }
 
 #ifdef HomogeneousField
-inline kfp::float_v KFParticleSIMD::GetFieldAlice()
+inline ::kfp::float_v KFParticleSIMD::GetFieldAlice()
 {
   /** Returns value of the constant homogemeous one-component magnetic field Bz,
    * (is defined in case of #ifdef HomogeneousField). */

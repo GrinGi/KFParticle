@@ -1,7 +1,15 @@
 /* Copyright (C) 2026 GSI Helmholtzzentrum fuer Schwerionenforschung, Darmstadt
    SPDX-License-Identifier: GPL-3.0-only */
 
+// Model dictionary include order: an imported namespace also exposes `kfp`.
+// Public KFParticle headers must resolve their own global namespace explicitly.
+namespace kfp_header_scope_test::kfp {}
+using namespace kfp_header_scope_test;
+
 #include "KFParticleGpuTestFixture.h"
+#include "KFPInputData.h"
+#include "KFParticleSIMD.h"
+#include "KFParticleTopoReconstructor.h"
 
 using namespace kfp_gpu_test;
 
@@ -62,101 +70,140 @@ TEST(KFParticleGpuHostInterfaceTest, PreservesPhysicalTracksAndFieldAwareMetadat
 
 TEST(KFParticleGpuHostInterfaceTest, CountPrefixFillMatchesReferenceBucketLayout)
 {
-  constexpr unsigned int trackCount = 16u;
-  const std::array<int, trackCount> pdgs{{
+  const std::array<int, 16u> pdgs{{
     999, 2212, -11, 321, 13, 1000010020, 1000010030, 1000020030,
     1000020040, 1000020060, 1000030060, 1000030070, 1000040070,
     211, 1, 3}};
-  KFPTrackVector first;
-  KFPTrackVector last;
-  first.Resize(trackCount);
-  last.Resize(trackCount);
-  std::vector<float> chi(trackCount);
-  for (unsigned int index = 0u; index < trackCount; ++index) {
-    const int charge = index >= 13u ? 1 : (index % 2u == 0u ? 1 : -1);
-    const int primaryVertexIndex = index >= 13u
-      ? -1 : (index % 3u == 0u ? 0 : -1);
-    FillTrack(first, index, 10.f * static_cast<float>(index),
-              500 + static_cast<int>(index),
-              pdgs[index], charge, primaryVertexIndex);
-    FillTrack(last, index,
-              1000.f + 10.f * static_cast<float>(index),
-              500 + static_cast<int>(index), pdgs[index], charge,
-              primaryVertexIndex);
-    // Layout follows first-point metadata, while packed last-point payload
-    // must still retain the actual last-point metadata.
-    last.SetPDG(index % 2u == 0u ? 888 : -888, index);
-    last.SetQ(-charge, index);
-    last.SetPVIndex(primaryVertexIndex >= 0 ? -1 : 0, index);
-    chi[index] = 0.5f + static_cast<float>(index);
-  }
-  const std::vector<KFVertex> vertices(1u);
-  ::kfparticle::gpu::GpuEventInput input;
-  input.eventId = 82u;
-  input.first = &first;
-  input.last = &last;
-  input.chiToPrimaryVertex = &chi;
-  input.primaryVertices = &vertices;
-  input.minSecondaryTrackChiToPrimaryVertex = 12.5f;
+  for (unsigned int trackCount : {0u, 1u, 3u, 4u, 5u, 7u, 8u, 9u, 16u}) {
+    SCOPED_TRACE(trackCount);
+    KFPTrackVector first;
+    KFPTrackVector last;
+    first.Resize(trackCount);
+    last.Resize(trackCount);
+    std::vector<float> chi(trackCount);
+    for (unsigned int index = 0u; index < trackCount; ++index) {
+      const int charge = index >= 13u ? 1 : (index % 2u == 0u ? 1 : -1);
+      const int primaryVertexIndex = index >= 13u
+        ? -1 : (index % 3u == 0u ? 0 : -1);
+      FillTrack(first, index, 10.f * static_cast<float>(index),
+                500 + static_cast<int>(index),
+                pdgs[index], charge, primaryVertexIndex);
+      FillTrack(last, index,
+                1000.f + 10.f * static_cast<float>(index),
+                500 + static_cast<int>(index), pdgs[index], charge,
+                primaryVertexIndex);
+      // Layout follows first-point metadata, while packed last-point payload
+      // must still retain the actual last-point metadata.
+      last.SetPDG(index % 2u == 0u ? 888 : -888, index);
+      last.SetQ(-charge, index);
+      last.SetPVIndex(primaryVertexIndex >= 0 ? -1 : 0, index);
+      chi[index] = 0.5f + static_cast<float>(index);
+    }
+    const std::vector<KFVertex> vertices(1u);
+    ::kfparticle::gpu::GpuEventInput input;
+    input.eventId = 82u;
+    input.first = &first;
+    input.last = &last;
+    input.chiToPrimaryVertex = &chi;
+    input.primaryVertices = &vertices;
+    input.minSecondaryTrackChiToPrimaryVertex = 12.5f;
 
-  const auto reference = ReferenceBucketPreparation(input);
-  const auto prepared = ::kfparticle::gpu::GpuInputPacker::Prepare(input);
-  ASSERT_EQ(prepared.TrackCount(), 2u * trackCount);
-  ASSERT_EQ(prepared.TrackCount(), reference.sourceTracks.size());
+    const auto reference = ReferenceBucketPreparation(input);
+    const auto prepared = ::kfparticle::gpu::GpuInputPacker::Prepare(input);
+    ASSERT_EQ(prepared.TrackCount(), 2u * trackCount);
+    ASSERT_EQ(prepared.TrackCount(), reference.sourceTracks.size());
 
-  HostStorage storage;
-  KFParticleGpuEventDesc actualDescriptor;
-  ::kfparticle::gpu::GpuInputPacker::Write(
-    prepared, storage.Tracks(prepared.TrackCount()), storage.Vertices(prepared.VertexCount()),
-    actualDescriptor);
-  EXPECT_EQ(actualDescriptor.eventId, reference.descriptor.eventId);
-  EXPECT_FLOAT_EQ(actualDescriptor.minSecondaryTrackChiToPrimaryVertex,
-                  reference.descriptor.minSecondaryTrackChiToPrimaryVertex);
-  EXPECT_EQ(actualDescriptor.primaryVertices.offset,
-            reference.descriptor.primaryVertices.offset);
-  EXPECT_EQ(actualDescriptor.primaryVertices.size,
-            reference.descriptor.primaryVertices.size);
-  for (unsigned int set = 0u; set < NumberOfTrackSets; ++set) {
-    EXPECT_EQ(actualDescriptor.trackSets[set].tracks.offset,
-              reference.descriptor.trackSets[set].tracks.offset);
-    EXPECT_EQ(actualDescriptor.trackSets[set].tracks.size,
-              reference.descriptor.trackSets[set].tracks.size);
-    for (unsigned int species = 0u;
-         species < NumberOfTrackSpecies; ++species) {
-      EXPECT_EQ(actualDescriptor.trackSets[set].species[species].offset,
-                reference.descriptor.trackSets[set].species[species].offset);
-      EXPECT_EQ(actualDescriptor.trackSets[set].species[species].size,
-                reference.descriptor.trackSets[set].species[species].size);
+    HostStorage storage;
+    KFParticleGpuEventDesc actualDescriptor;
+    ::kfparticle::gpu::GpuInputPacker::Write(
+      prepared, storage.Tracks(prepared.TrackCount()), storage.Vertices(prepared.VertexCount()),
+      actualDescriptor);
+    EXPECT_EQ(actualDescriptor.eventId, reference.descriptor.eventId);
+    EXPECT_FLOAT_EQ(actualDescriptor.minSecondaryTrackChiToPrimaryVertex,
+                    reference.descriptor.minSecondaryTrackChiToPrimaryVertex);
+    EXPECT_EQ(actualDescriptor.primaryVertices.offset,
+              reference.descriptor.primaryVertices.offset);
+    EXPECT_EQ(actualDescriptor.primaryVertices.size,
+              reference.descriptor.primaryVertices.size);
+    for (unsigned int set = 0u; set < NumberOfTrackSets; ++set) {
+      EXPECT_EQ(actualDescriptor.trackSets[set].tracks.offset,
+                reference.descriptor.trackSets[set].tracks.offset);
+      EXPECT_EQ(actualDescriptor.trackSets[set].tracks.size,
+                reference.descriptor.trackSets[set].tracks.size);
+      for (unsigned int species = 0u;
+           species < NumberOfTrackSpecies; ++species) {
+        EXPECT_EQ(actualDescriptor.trackSets[set].species[species].offset,
+                  reference.descriptor.trackSets[set].species[species].offset);
+        EXPECT_EQ(actualDescriptor.trackSets[set].species[species].size,
+                  reference.descriptor.trackSets[set].species[species].size);
+      }
+    }
+    const auto packed = storage.Tracks(prepared.TrackCount());
+    for (unsigned int packedIndex = 0u;
+         packedIndex < prepared.TrackCount(); ++packedIndex) {
+      const auto sourceReference = reference.sourceTracks[packedIndex];
+      const KFPTrackVector& source = sourceReference.atLastPoint ? last : first;
+      const unsigned int sourceIndex = sourceReference.index;
+      for (unsigned int component = 0u; component < 6u; ++component) {
+        EXPECT_FLOAT_EQ(packed.Numerical().Parameter(component, packedIndex),
+                        source.Parameter(component)[sourceIndex]);
+      }
+      for (unsigned int component = 0u; component < 21u; ++component) {
+        EXPECT_FLOAT_EQ(packed.Numerical().Covariance(component, packedIndex),
+                        source.Covariance(component)[sourceIndex]);
+      }
+  #ifdef NonhomogeneousField
+      for (unsigned int component = 0u; component < 10u; ++component) {
+        EXPECT_FLOAT_EQ(packed.FieldCoefficient(component, packedIndex),
+                        source.FieldCoefficient(component)[sourceIndex]);
+      }
+  #endif
+      EXPECT_FLOAT_EQ(packed.ChiToPrimaryVertex(packedIndex), chi[sourceIndex]);
+      EXPECT_EQ(packed.SourceId(packedIndex), source.Id()[sourceIndex]);
+      EXPECT_EQ(packed.Pdg(packedIndex), source.PDG()[sourceIndex]);
+      EXPECT_EQ(packed.Charge(packedIndex), source.Q()[sourceIndex]);
+      EXPECT_EQ(packed.PrimaryVertexIndex(packedIndex),
+                source.PVIndex()[sourceIndex]);
+      EXPECT_EQ(packed.NumberOfPixelHits(packedIndex),
+                source.NPixelHits()[sourceIndex]);
     }
   }
-  const auto packed = storage.Tracks(prepared.TrackCount());
-  for (unsigned int packedIndex = 0u;
-       packedIndex < prepared.TrackCount(); ++packedIndex) {
-    const auto sourceReference = reference.sourceTracks[packedIndex];
-    const KFPTrackVector& source = sourceReference.atLastPoint ? last : first;
-    const unsigned int sourceIndex = sourceReference.index;
-    for (unsigned int component = 0u; component < 6u; ++component) {
-      EXPECT_FLOAT_EQ(packed.Numerical().Parameter(component, packedIndex),
-                      source.Parameter(component)[sourceIndex]);
+}
+
+TEST(KFParticleGpuHostInterfaceTest, IndependentTransportJacobianDoesNotRequireSelfJacobian)
+{
+  KFParticle source;
+  source.Px() = 0.3f;
+  source.Py() = 0.2f;
+  source.Pz() = 0.7f;
+  source.E() = 1.f;
+  source.Q() = 1;
+  for (int i = 0; i < 10; ++i) { source.SetFieldCoeff(i == 3 ? 0.1f : 0.f, i); }
+  const KFParticleSIMD particle(source);
+  ::kfp::float_v dsdr[6], dsdrOther[6];
+  for (int i = 0; i < 6; ++i) {
+    dsdr[i] = 0.01f * (i + 1);
+    dsdrOther[i] = -0.02f * (i + 1);
+  }
+  for (bool fullField : {false, true}) {
+    SCOPED_TRACE(fullField);
+    ::kfp::float_v parameters[8]{}, covariance[36]{};
+    ::kfp::float_v self[36]{}, both[36]{}, independent[36]{};
+    const auto transport = [&](::kfp::float_v* f, ::kfp::float_v* f1) {
+      if (fullField) { particle.TransportCBM(0.5f, dsdr, parameters, covariance, dsdrOther, f, f1); }
+      else { particle.TransportLine(0.5f, dsdr, parameters, covariance, dsdrOther, f, f1); }
+    };
+    transport(self, both);
+    transport(nullptr, independent);
+    bool nonzero = false;
+    for (int entry = 0; entry < 36; ++entry) {
+      for (int lane = 0; lane < ::kfp::SimdLen; ++lane) {
+        EXPECT_TRUE(std::isfinite(independent[entry][lane]));
+        EXPECT_FLOAT_EQ(independent[entry][lane], both[entry][lane]);
+        nonzero = nonzero || independent[entry][lane] != 0.f;
+      }
     }
-    for (unsigned int component = 0u; component < 21u; ++component) {
-      EXPECT_FLOAT_EQ(packed.Numerical().Covariance(component, packedIndex),
-                      source.Covariance(component)[sourceIndex]);
-    }
-#ifdef NonhomogeneousField
-    for (unsigned int component = 0u; component < 10u; ++component) {
-      EXPECT_FLOAT_EQ(packed.FieldCoefficient(component, packedIndex),
-                      source.FieldCoefficient(component)[sourceIndex]);
-    }
-#endif
-    EXPECT_FLOAT_EQ(packed.ChiToPrimaryVertex(packedIndex), chi[sourceIndex]);
-    EXPECT_EQ(packed.SourceId(packedIndex), source.Id()[sourceIndex]);
-    EXPECT_EQ(packed.Pdg(packedIndex), source.PDG()[sourceIndex]);
-    EXPECT_EQ(packed.Charge(packedIndex), source.Q()[sourceIndex]);
-    EXPECT_EQ(packed.PrimaryVertexIndex(packedIndex),
-              source.PVIndex()[sourceIndex]);
-    EXPECT_EQ(packed.NumberOfPixelHits(packedIndex),
-              source.NPixelHits()[sourceIndex]);
+    EXPECT_TRUE(nonzero);
   }
 }
 

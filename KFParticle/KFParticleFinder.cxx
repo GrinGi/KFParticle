@@ -1854,8 +1854,6 @@ void KFParticleFinder::Find2DaughterDecay(KFPTrackVector* vTracks, PaddedVector<
                                  chiPrimPos[lane], chiPrimNeg[lane], -1.f, 0.f, ptPos2[lane], ptNeg2[lane]);
                   }
                 }
-                
-
                 if (none_of(active[iPDGPos])) { continue; }
 
 

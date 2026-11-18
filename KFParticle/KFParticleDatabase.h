@@ -41,8 +41,8 @@
 
 class KFParticleDatabase {
  public:
-  using float_v = kfp::float_v;
-  using int_v   = kfp::int_v;
+  using float_v = ::kfp::float_v;
+  using int_v   = ::kfp::int_v;
 
   KFParticleDatabase();
 
@@ -92,25 +92,25 @@ class KFParticleDatabase {
      *SIMD-vector format
      **/
     int_v pdgIndex(2);
-    pdgIndex     = kfp::simd::select(abs(pdg) == 11, 0, pdgIndex);
-    pdgIndex     = kfp::simd::select(abs(pdg) == 13, 1, pdgIndex);
-    pdgIndex     = kfp::simd::select(abs(pdg) == 19, 1, pdgIndex);
-    pdgIndex     = kfp::simd::select(abs(pdg) == 211, 2, pdgIndex);
-    pdgIndex     = kfp::simd::select(abs(pdg) == 321, 3, pdgIndex);
-    pdgIndex     = kfp::simd::select(abs(pdg) == 2212, 4, pdgIndex);
-    pdgIndex     = kfp::simd::select(abs(pdg) == 1000010020, 5, pdgIndex);
-    pdgIndex     = kfp::simd::select(abs(pdg) == 1000010030, 6, pdgIndex);
-    pdgIndex     = kfp::simd::select(abs(pdg) == 1000020030, 7, pdgIndex);
-    pdgIndex     = kfp::simd::select(abs(pdg) == 1000020040, 8, pdgIndex);
-    pdgIndex     = kfp::simd::select(abs(pdg) == 1000020060, 9, pdgIndex);
-    pdgIndex     = kfp::simd::select(abs(pdg) == 1000030060, 10, pdgIndex);
-    pdgIndex     = kfp::simd::select(abs(pdg) == 1000030070, 11, pdgIndex);
-    pdgIndex     = kfp::simd::select(abs(pdg) == 1000040070, 12, pdgIndex);
-    pdgIndex     = kfp::simd::select(abs(pdg) == 3112, 13, pdgIndex);
-    pdgIndex     = kfp::simd::select(abs(pdg) == 3222, 14, pdgIndex);
-    pdgIndex     = kfp::simd::select(abs(pdg) == 3312, 15, pdgIndex);
-    pdgIndex     = kfp::simd::select(abs(pdg) == 3334, 16, pdgIndex);
-    float_v mass = kfp::simd::gather(fMass, pdgIndex);
+    pdgIndex     = ::kfp::simd::select(abs(pdg) == 11, 0, pdgIndex);
+    pdgIndex     = ::kfp::simd::select(abs(pdg) == 13, 1, pdgIndex);
+    pdgIndex     = ::kfp::simd::select(abs(pdg) == 19, 1, pdgIndex);
+    pdgIndex     = ::kfp::simd::select(abs(pdg) == 211, 2, pdgIndex);
+    pdgIndex     = ::kfp::simd::select(abs(pdg) == 321, 3, pdgIndex);
+    pdgIndex     = ::kfp::simd::select(abs(pdg) == 2212, 4, pdgIndex);
+    pdgIndex     = ::kfp::simd::select(abs(pdg) == 1000010020, 5, pdgIndex);
+    pdgIndex     = ::kfp::simd::select(abs(pdg) == 1000010030, 6, pdgIndex);
+    pdgIndex     = ::kfp::simd::select(abs(pdg) == 1000020030, 7, pdgIndex);
+    pdgIndex     = ::kfp::simd::select(abs(pdg) == 1000020040, 8, pdgIndex);
+    pdgIndex     = ::kfp::simd::select(abs(pdg) == 1000020060, 9, pdgIndex);
+    pdgIndex     = ::kfp::simd::select(abs(pdg) == 1000030060, 10, pdgIndex);
+    pdgIndex     = ::kfp::simd::select(abs(pdg) == 1000030070, 11, pdgIndex);
+    pdgIndex     = ::kfp::simd::select(abs(pdg) == 1000040070, 12, pdgIndex);
+    pdgIndex     = ::kfp::simd::select(abs(pdg) == 3112, 13, pdgIndex);
+    pdgIndex     = ::kfp::simd::select(abs(pdg) == 3222, 14, pdgIndex);
+    pdgIndex     = ::kfp::simd::select(abs(pdg) == 3312, 15, pdgIndex);
+    pdgIndex     = ::kfp::simd::select(abs(pdg) == 3334, 16, pdgIndex);
+    float_v mass = ::kfp::simd::gather(fMass, pdgIndex);
     return mass;
   }
 
@@ -129,16 +129,16 @@ class KFParticleDatabase {
 
     int_v pdgIndex(0);
     // pdgIndex = select(pdg ==  310     , 0, pdgIndex);
-    pdgIndex = kfp::simd::select(abs(pdg) == 3122, 1, pdgIndex);
-    pdgIndex = kfp::simd::select(abs(pdg) == 3312, 2, pdgIndex);
-    pdgIndex = kfp::simd::select(pdg == 22, 3, pdgIndex);
-    pdgIndex = kfp::simd::select(abs(pdg) == 3334, 4, pdgIndex);
-    pdgIndex = kfp::simd::select(abs(pdg) == 3004, 5, pdgIndex);
-    pdgIndex = kfp::simd::select(abs(pdg) == 3006, 6, pdgIndex);
-    pdgIndex = kfp::simd::select(abs(pdg) == 3007, 7, pdgIndex);
+    pdgIndex = ::kfp::simd::select(abs(pdg) == 3122, 1, pdgIndex);
+    pdgIndex = ::kfp::simd::select(abs(pdg) == 3312, 2, pdgIndex);
+    pdgIndex = ::kfp::simd::select(pdg == 22, 3, pdgIndex);
+    pdgIndex = ::kfp::simd::select(abs(pdg) == 3334, 4, pdgIndex);
+    pdgIndex = ::kfp::simd::select(abs(pdg) == 3004, 5, pdgIndex);
+    pdgIndex = ::kfp::simd::select(abs(pdg) == 3006, 6, pdgIndex);
+    pdgIndex = ::kfp::simd::select(abs(pdg) == 3007, 7, pdgIndex);
 
-    massMotherPDG      = kfp::simd::gather(fMassSecPDG, pdgIndex);
-    massMotherPDGSigma = kfp::simd::gather(fMassSecPDGSigma, pdgIndex);
+    massMotherPDG      = ::kfp::simd::gather(fMassSecPDG, pdgIndex);
+    massMotherPDGSigma = ::kfp::simd::gather(fMassSecPDGSigma, pdgIndex);
   }
 
   void GetMotherMass(const int pdg, float& massMotherPDG, float& massMotherPDGSigma) const

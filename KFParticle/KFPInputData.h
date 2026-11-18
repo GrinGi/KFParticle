@@ -81,8 +81,8 @@ struct KFPTrackIndex {
 
 class KFPInputData {
  public:
-  using int_v   = kfp::simd::int_v;
-  using float_v = kfp::simd::float_v;
+  using int_v   = ::kfp::simd::int_v;
+  using float_v = ::kfp::simd::float_v;
 
   void* operator new(size_t size)
   {
@@ -367,8 +367,8 @@ struct KFPInputDataArray {
  **/
 
 struct KFPLinkedList {
-  using int_v   = kfp::simd::int_v;
-  using float_v = kfp::simd::float_v;
+  using int_v   = ::kfp::simd::int_v;
+  using float_v = ::kfp::simd::float_v;
 
   void* operator new(size_t size)
   {

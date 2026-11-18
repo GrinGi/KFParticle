@@ -70,12 +70,13 @@ Set(INCLUDE_DIRECTORIES
   ${PROJECT_SOURCE_DIR}/KFParticle
   ${PROJECT_SOURCE_DIR}/KFParticlePerformance
   ${PROJECT_SOURCE_DIR}/KFParticleTest
-  ${PROJECT_SOURCE_DIR}/externals/vir-simd
 )
 
 include(${ROOT_USE_FILE})
+get_target_property(KFPARTICLE_SIMD_SOURCE_DIR vir-simd SOURCE_DIR)
 set(CMAKE_INCLUDE_DIRECTORIES_BEFORE ON)
 Include_Directories( ${CMAKE_CURRENT_SOURCE_DIR} ${INCLUDE_DIRECTORIES} )
+Include_Directories(${KFPARTICLE_SIMD_SOURCE_DIR})
 if(KFPARTICLE_USE_XPU)
   Include_Directories(${KFPARTICLE_XPU_INCLUDE_DIRS})
 endif()
@@ -256,7 +257,6 @@ Set(NODICT_HEADERS
   KFParticle/KFParticleField.h
   KFParticle/KFPTrackVector.h
   KFParticle/KFParticleDatabase.h
-  KFParticle/KFParticleMath.h
   KFParticlePerformance/KFTopoPerformance.h
   KFParticlePerformance/KFParticlePerformanceBase.h
   KFParticlePerformance/KFMCCounter.h

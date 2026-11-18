@@ -38,15 +38,15 @@
 
 namespace kfp
 {
-  using kfp::simd::float_m;
-  using kfp::simd::float_v;
-  using kfp::simd::int_m;
-  using kfp::simd::int_v;
-  using kfp::simd::PaddedVector;
-  using kfp::simd::select;
-  using kfp::simd::SimdAlignmentF;
-  using kfp::simd::SimdAlignmentI;
-  using kfp::simd::SimdLen;
+  using ::kfp::simd::float_m;
+  using ::kfp::simd::float_v;
+  using ::kfp::simd::int_m;
+  using ::kfp::simd::int_v;
+  using ::kfp::simd::PaddedVector;
+  using ::kfp::simd::select;
+  using ::kfp::simd::SimdAlignmentF;
+  using ::kfp::simd::SimdAlignmentI;
+  using ::kfp::simd::SimdLen;
 }  // namespace kfp
 
 #if defined(HLTCA_STANDALONE)

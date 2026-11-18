@@ -11,8 +11,10 @@ application. Online and offline applications use the same reconstruction API.
 
 ## Requirements
 
-- Linux x86-64 with SSE4.1, a C++17 compiler and CMake 3.20 or newer.
-- Installed CERN ROOT and Vc, including their CMake package files.
+- Linux x86-64 with SSE4.2, a C++17 compiler and CMake 3.20 or newer.
+- Installed CERN ROOT, including its CMake package files.
+- [vir-simd](https://github.com/mattkretz/vir-simd), downloaded automatically by
+  CMake at the same revision used by CBMRoot. No separate installation is needed.
 - Installed, unmodified [XPU master](https://github.com/xpu-devel/xpu), with
   headers and shared libraries. For AMD GPU execution its HIP backend is required.
 - A compatible AMD GPU and ROCm toolchain, including HIP, rocPRIM and hipCUB.
@@ -38,13 +40,12 @@ export KF_BUILD=/path/to/kfparticle-build
 export KF_PREFIX=/path/to/kfparticle-install
 export XPU_PREFIX=/path/to/installed/xpu
 export ROOT_PREFIX=/path/to/installed/root
-export VC_PREFIX=/path/to/installed/vc
 export ROCM_ROOT=/opt/rocm
 
 source "$ROOT_PREFIX/bin/thisroot.sh"
 cmake -S "$KF_SOURCE" -B "$KF_BUILD" \
   -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$KF_PREFIX" \
-  -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_PREFIX_PATH="$ROOT_PREFIX;$VC_PREFIX" \
+  -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_PREFIX_PATH="$ROOT_PREFIX" \
   -DKFPARTICLE_USE_XPU=ON -DFIXTARGET=ON -DKFPARTICLE_INSTALL_SDK=ON \
   -DKFPARTICLE_XPU_ROOT="$XPU_PREFIX" -DXPU_ENABLE_HIP=ON -DXPU_ENABLE_OPENMP=ON \
   -DXPU_HIP_ARCH=native -DXPU_ROCM_ROOT="$ROCM_ROOT"
@@ -58,7 +59,9 @@ GPUs accessible and use XPU built for those architectures as well. For a build
 targeting other machines, set `XPU_HIP_ARCH` to their architecture list instead.
 `FIXTARGET=ON` selects the nonhomogeneous field model required by the current GPU
 input interface. For a CPU-XPU build use `-DXPU_ENABLE_HIP=OFF` and omit the ROCm
-options. Use compatible compiler, ROOT/Vc and XPU builds throughout.
+options. Use compatible compiler, ROOT and XPU builds throughout.
+The installed SDK includes vir-simd headers and its CMake package; vir-simd has
+no shared library or runtime search-path requirement.
 
 The installation provides headers under `include/`, the host library and enabled
 kernel images under `lib/`, and a CMake package under `lib/cmake/KFParticle/`.
@@ -72,7 +75,7 @@ or application runtime paths. Adjust `XPU_LIB_DIR` if XPU uses `lib64`:
 
 ```bash
 export XPU_LIB_DIR="$XPU_PREFIX/lib"
-export LD_LIBRARY_PATH="$KF_PREFIX/lib:$XPU_LIB_DIR:$(root-config --libdir):$VC_PREFIX/lib:$ROCM_ROOT/lib:$ROCM_ROOT/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="$KF_PREFIX/lib:$XPU_LIB_DIR:$(root-config --libdir):$ROCM_ROOT/lib:$ROCM_ROOT/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 ```
 
 ## Using the C++ library
@@ -87,7 +90,7 @@ target_link_libraries(my_analysis PRIVATE KFParticle::KFParticle)
 
 ```bash
 cmake -S /path/to/my-analysis -B /path/to/my-analysis-build \
-  -DCMAKE_PREFIX_PATH="$KF_PREFIX;$ROOT_PREFIX;$VC_PREFIX" \
+  -DCMAKE_PREFIX_PATH="$KF_PREFIX;$ROOT_PREFIX" \
   -DKFPARTICLE_XPU_ROOT="$XPU_PREFIX"
 cmake --build /path/to/my-analysis-build --parallel 8
 ```
@@ -173,7 +176,7 @@ Use the dependency paths and runtime library environment from
 ```bash
 export EXAMPLE_BUILD=/path/to/kfparticle-example-build
 cmake -S "$KF_PREFIX/share/KFParticle/example" -B "$EXAMPLE_BUILD" \
-  -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$KF_PREFIX;$ROOT_PREFIX;$VC_PREFIX" \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$KF_PREFIX;$ROOT_PREFIX" \
   -DKFPARTICLE_XPU_ROOT="$XPU_PREFIX"
 cmake --build "$EXAMPLE_BUILD" --parallel 8
 export KFP_EXAMPLE="$EXAMPLE_BUILD/KFParticleGpuExample"
@@ -255,6 +258,11 @@ event-selection masks rather than a persistent branch containing every particle.
 Offline qualified batches stay within one FairRunAna input entry, so a larger
 batch limit does not combine separate single-event entries.
 
+CBMRoot's `--qa KfpSelector` processes GPU events individually so each QA fill
+sees the matching selector state. The configured batch limit is an upper bound;
+it does not enable batching while this QA is active. Measure batched throughput
+without KFP QA and run the QA control separately on the same input/configuration.
+
 KFP console output is opt-in; CBMRoot's own timing output is unchanged.
 Set `KFPARTICLE_GPU_PERFORMANCE_MONITORING=1` for the CPU/GPU stage timing table.
 The independent `KFPARTICLE_GPU_REPORT=1` switch enables verbose event/batch,
@@ -276,7 +284,7 @@ After the standalone installation above, build only the small test application:
 export KF_CHECK=/path/to/kfparticle-check-build
 cmake -S "$KF_PREFIX/share/KFParticle/standalone" -B "$KF_CHECK" \
   -DKFPARTICLE_GPU_TEST_INSTALLED=ON -DKFPARTICLE_GPU_TEST_DEVICE=hip0 \
-  -DCMAKE_PREFIX_PATH="$KF_PREFIX;$ROOT_PREFIX;$VC_PREFIX" \
+  -DCMAKE_PREFIX_PATH="$KF_PREFIX;$ROOT_PREFIX" \
   -DKFPARTICLE_XPU_ROOT="$XPU_PREFIX" -DCMAKE_BUILD_TYPE=Release
 cmake --build "$KF_CHECK" --parallel 8
 ctest --test-dir "$KF_CHECK" --output-on-failure --no-tests=error
